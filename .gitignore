@@ -1,0 +1,25 @@
+# ===== 数据集与训练产物（体积大，不纳入版本库）=====
+demo_data
+demo_data_language
+omy_pnp
+omy_pnp_language
+ckpt
+wandb
+
+# ===== 第三方/解压资源 =====
+lerobot
+asset/objaverse/plate_11
+
+# ===== Python 缓存与虚拟环境 =====
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv
+venv/
+.ipynb_checkpoints/
+
+# ===== 操作系统/编辑器杂项 =====
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
