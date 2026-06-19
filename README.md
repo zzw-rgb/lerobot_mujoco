@@ -128,7 +128,7 @@ git --version
 
 ```bash
 # 把项目克隆到本地（或直接下载 zip 解压亦可）
-git clone <本项目仓库地址> lerobot_mujoco
+git clone https://github.com/zzw-rgb/lerobot_mujoco.git lerobot_mujoco
 cd lerobot_mujoco
 ```
 
