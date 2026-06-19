@@ -108,7 +108,7 @@ policy.to(device)
 
 # 加载仿真"环境"。MuJoCo 是一个物理仿真器，能在电脑里模拟出机械臂、桌子、杯子、盘子，
 # 以及它们之间的接触、重力等物理效果——相当于一个"虚拟实验场"，让策略在里面安全地练手/演示。
-from mujoco_env.y_env import SimpleEnv
+from mujoco_env.SimpleEnv1 import SimpleEnv
 # 场景的 XML 文件：描述了这个虚拟世界里有哪些物体、它们的位置和外观（相当于"舞台布景图纸"）。
 xml_path = './asset/example_scene_y.xml'
 # 创建抓放（Pick-and-Place，简称 PnP）环境实例。

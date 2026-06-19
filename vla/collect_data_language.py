@@ -87,7 +87,7 @@ import random
 import numpy as np                                  # 数值计算库（处理数组、向量）
 import os                                           # 操作系统接口（这里用来判断文件夹是否存在）
 from PIL import Image                               # 图像处理库（这里用来把画面缩放到 256x256）
-from mujoco_env.y_env2 import SimpleEnv2            # 本项目的仿真环境类（语言条件版的「多杯子+盘子」场景）
+from mujoco_env.SimpleEnv2 import SimpleEnv2            # 本项目的仿真环境类（语言条件版的「多杯子+盘子」场景）
 from lerobot.common.datasets.lerobot_dataset import LeRobotDataset  # LeRobot 的数据集类，负责按标准格式存数据
 
 # --- 一些可调节的参数（采集前先设好）---

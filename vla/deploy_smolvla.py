@@ -34,7 +34,7 @@ SmolVLA 更小、更省显存、推理更快，但模型容量小一些；
 （“语言条件”= 机器人的行为由一句语言指令来决定/引导。）
 
 训练 SmolVLA 请在终端运行：
-    python vla/train_vla.py --config_path smolvla_omy.yaml
+    python vla/train_vla.py --config_path config/smolvla_omy.yaml
 
 部署运行方式（需要 GPU + 图形界面）：
     conda activate lerobot
@@ -97,7 +97,7 @@ _os.chdir(_PROJECT_ROOT)
 # 训练很耗时也耗显卡，通常在另一台带 GPU 的机器上单独跑一次即可，
 # 跑完会得到权重文件（见后面 from_pretrained 加载的那个路径）。
 # 部署阶段（本脚本）不需要重新训练，直接加载现成权重就行。
-# [终端命令] python vla/train_vla.py --config_path smolvla_omy.yaml
+# [终端命令] python vla/train_vla.py --config_path config/smolvla_omy.yaml
 
 # ======================================================================
 # ## 步骤 3. 部署
@@ -162,7 +162,7 @@ policy.to(device)
 
 # 创建仿真环境：相当于在电脑里搭一个“虚拟实验室”，里面有机械臂和待抓取的物体。
 # 我们先在仿真里验证模型，安全又省钱，不用担心真机摔坏。
-from mujoco_env.y_env2 import SimpleEnv2  # MuJoCo 是一款物理仿真引擎；SimpleEnv2 是基于它封装的抓放环境
+from mujoco_env.SimpleEnv2 import SimpleEnv2  # MuJoCo 是一款物理仿真引擎；SimpleEnv2 是基于它封装的抓放环境
 xml_path = './asset/example_scene_y2.xml'  # 场景描述文件：定义了机械臂、桌子、物体的位置和外观
 # action_type='joint_angle' 表示我们用“关节角度”来控制机械臂
 # （即直接告诉每个关节转到多少度，而不是告诉末端去哪个坐标）。

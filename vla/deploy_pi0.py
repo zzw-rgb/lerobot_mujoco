@@ -24,7 +24,7 @@
 ==============================================================================================
 
 训练 π0 请在终端运行（train_vla.py 即原 train_model.py 改名而来）：
-    python vla/train_vla.py --config_path pi0_omy.yaml
+    python vla/train_vla.py --config_path config/pi0_omy.yaml
 
 部署运行方式（需要 GPU + 图形界面）：
     conda activate lerobot
@@ -79,11 +79,11 @@ _os.chdir(_PROJECT_ROOT)
 # [终端命令] git clone https://huggingface.co/datasets/Jeongeun/omy_pnp_language
 
 # ======================================================================
-# ## 步骤 1. 修改配置文件 pi0_omy.yaml
+# ## 步骤 1. 修改配置文件 config/pi0_omy.yaml
 # ======================================================================
 
 # ======================================================================
-# pi0_omy.yaml 文件
+# config/pi0_omy.yaml 文件
 # ```
 # dataset:
 #   repo_id: omy_pnp
@@ -121,7 +121,7 @@ _os.chdir(_PROJECT_ROOT)
 
 # 步骤 2 的训练命令：在终端里运行下面这行，开始用配置文件训练 π0。
 # （train_vla.py 就是原来的 train_model.py，只是改了个更贴切的名字：train VLA = 训练 VLA 模型）
-# [终端命令] python vla/train_vla.py --config_path pi0_omy.yaml
+# [终端命令] python vla/train_vla.py --config_path config/pi0_omy.yaml
 
 # ======================================================================
 # ## 步骤 3. 部署
@@ -204,7 +204,7 @@ policy.to(device)
 # 用 MuJoCo（一个物理仿真器）搭一个虚拟的桌面抓放场景。
 # xml_path 指向场景描述文件（里面写了机器人、桌子、物块等长什么样、放哪里）。
 # action_type='joint_angle' 表示：我们给环境的动作是“关节角度”，即直接告诉每个关节该转到多少度。
-from mujoco_env.y_env2 import SimpleEnv2
+from mujoco_env.SimpleEnv2 import SimpleEnv2
 xml_path = './asset/example_scene_y2.xml'
 PnPEnv = SimpleEnv2(xml_path, action_type='joint_angle')
 

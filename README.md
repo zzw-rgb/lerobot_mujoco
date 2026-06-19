@@ -37,8 +37,8 @@ lerobot-mujoco-tutorial-master/
 │   ├── utils.py                # 通用工具：随机采样、图像处理、轨迹插值、XML 等
 │   ├── ik.py                   # 逆运动学（IK）求解：增广雅可比 + 阻尼最小二乘
 │   ├── transforms.py           # 坐标/旋转变换：欧拉角、四元数、齐次矩阵、点云等
-│   ├── y_env.py                # 单物体抓放环境 SimpleEnv
-│   └── y_env2.py               # 语言条件多物体环境 SimpleEnv2
+│   ├── SimpleEnv1.py           # 单物体抓放环境 SimpleEnv1
+│   └── SimpleEnv2.py           # 语言条件多物体环境 SimpleEnv2
 │
 ├── act/                        # 【流水线一】ACT 模仿学习全流程
 │   ├── collect_data_act.py     #   步骤1：键盘遥操作采集示教数据
@@ -53,8 +53,9 @@ lerobot-mujoco-tutorial-master/
 │   ├── deploy_pi0.py           #   步骤7：部署微调好的 π0
 │   └── deploy_smolvla.py       #   步骤8：部署微调好的 SmolVLA
 │
-├── pi0_omy.yaml                # π0 训练配置
-├── smolvla_omy.yaml            # SmolVLA 训练配置
+├── config/                     # 训练配置文件
+│   ├── pi0_omy.yaml            #   π0 训练配置
+│   └── smolvla_omy.yaml        #   SmolVLA 训练配置
 ├── requirements.txt            # 依赖清单
 │
 ├── asset/                      # 仿真资源
@@ -64,8 +65,12 @@ lerobot-mujoco-tutorial-master/
 │   ├── example_scene_y.xml     # 单物体场景（SimpleEnv 使用）
 │   └── example_scene_y2.xml    # 语言条件多物体场景（SimpleEnv2 使用）
 │
-├── demo_data_example/          # 一段示例数据（LeRobot 数据集格式）
 └── media/                      # 本文档用到的演示图/动图
+
+# 运行后会自动生成（已在 .gitignore 中忽略，不在仓库里）：
+#   demo_data/            ACT 流水线采集的数据集
+#   demo_data_language/   VLA 流水线采集的语言条件数据集
+#   ckpt/                 训练得到的模型检查点
 ```
 
 **两条流水线（两个文件夹）：**
@@ -81,7 +86,7 @@ lerobot-mujoco-tutorial-master/
 教程脚本 (各步骤 .py 脚本 / train_act.py / train_vla.py)
         │  调用
         ▼
-SimpleEnv / SimpleEnv2  (y_env.py / y_env2.py)   ← 任务级封装：reset / step / teleop / 成功判定
+SimpleEnv1 / SimpleEnv2  (SimpleEnv1.py / SimpleEnv2.py)   ← 任务级封装：reset / step / teleop / 成功判定
         │  组合
         ▼
 MuJoCoParserClass (mujoco_parser.py)             ← 仿真级封装：加载模型 / 步进 / 渲染 / 相机
@@ -97,47 +102,97 @@ MuJoCo 3.1.6 物理引擎
 
 ## 二、环境安装
 
-> 说明：本项目在 **Python 3.10** 下测试通过；MuJoCo 版本必须为 **3.1.6**。训练需要 NVIDIA GPU（依赖按 CUDA 12.4 的 PyTorch 2.6 配置）。
+本章手把手带你从零搭好运行环境。**第一次跑这类项目的同学，照着从头做到尾即可。**
 
-### 1. 创建虚拟环境
+> **环境前提**
+> - 操作系统：Linux（推荐 Ubuntu 20.04/22.04）或 Windows 均可；**遥操作采集**需要带显示器的机器。
+> - Python：**3.10**（必须，其他版本可能装不上指定依赖）。
+> - MuJoCo：**3.1.6**（由 `requirements.txt` 锁定，无需单独装）。
+> - GPU：**训练 ACT / π0 / SmolVLA 需要 NVIDIA 显卡**（依赖按 CUDA 12.4 的 PyTorch 2.6 配置）；只想"回放数据/看仿真"则用 CPU 也能跑。
+
+### 0. 准备工作：装 Conda 与 Git
+
+如果你电脑里还没有 Conda 和 Git，先装好它们（已装过可跳过）：
+
+- **Conda**：去 [Miniconda 官网](https://docs.conda.io/en/latest/miniconda.html) 下载对应系统的安装包装上。它用来创建互不干扰的"虚拟环境"。
+- **Git**：去 [git-scm.com](https://git-scm.com/downloads) 下载安装。它用来下载本项目和 LeRobot 代码。
+
+装完后，打开终端（Windows 用"Anaconda Prompt"，Linux 用普通终端），输入下面两行能看到版本号就说明装好了：
 
 ```bash
-conda create -n lerobot python=3.10 -y
-conda activate lerobot
+conda --version
+git --version
 ```
 
-### 2. 安装依赖
-
-不建议直接 `pip install lerobot`（会引入版本冲突）。本项目通过 `requirements.txt` 锁定了一个可用的 LeRobot commit，直接安装即可：
+### 1. 下载本项目代码
 
 ```bash
-cd /path/to/lerobot-mujoco-tutorial-master
+# 把项目克隆到本地（或直接下载 zip 解压亦可）
+git clone <本项目仓库地址> lerobot_mujoco
+cd lerobot_mujoco
+```
+
+> 之后所有命令，默认你**都在这个项目根目录 `lerobot_mujoco/` 下执行**。
+
+### 2. 创建并激活虚拟环境
+
+```bash
+conda create -n lerobot python=3.10 -y   # 新建一个名为 lerobot 的环境
+conda activate lerobot                   # 激活它（之后每次开新终端都要先执行这句）
+```
+
+> 激活成功后，命令行最前面会出现 `(lerobot)` 字样。**之后跑任何脚本前，都要先确认 `(lerobot)` 已激活。**
+
+### 3. 安装所有依赖（含 LeRobot）
+
+本项目的核心库 **LeRobot 不要用 `pip install lerobot` 直接装**（官方源版本变动快、容易和本项目其他依赖冲突）。我们已经在 `requirements.txt` 里**锁定了一个经过验证、可用的 LeRobot 指定提交（commit）**，连同 PyTorch、MuJoCo 等一并安装，一条命令搞定：
+
+```bash
 pip install -r requirements.txt
 ```
 
-`requirements.txt` 关键内容：
+这条命令会做这些事（无需手动操作，了解即可）：
 
 | 依赖 | 版本 | 用途 |
 |------|------|------|
 | `mujoco` | 3.1.6 | 物理仿真引擎 |
-| `torch / torchvision / torchaudio` | 2.6.0（cu124） | 深度学习框架 |
+| `torch / torchvision / torchaudio` | 2.6.0（cu124） | 深度学习框架（CUDA 12.4） |
 | `transformers` | 4.50.3 | π0/SmolVLA 的视觉语言骨干 |
-| `lerobot` | 指定 git commit | 数据集格式、策略实现、训练工具 |
+| `lerobot` | 锁定的 git commit | 数据集格式、策略实现、训练工具 |
 | `datasets` | 3.4.1 | 数据集底层 |
 | `pyautogui / matplotlib / scipy` | — | 遥操作、绘图、数值工具 |
 
-### 3. 解压物体资源
+> **关于 LeRobot 是怎么装进来的**：`requirements.txt` 最后一行
+> `git+https://github.com/huggingface/lerobot.git@10b7b35...#egg=lerobot`
+> 表示 pip 会自动从 GitHub 克隆 LeRobot 仓库、切到那个指定 commit 再安装。**因此安装时需要联网，并且能正常访问 GitHub。** 如果这一步卡住或失败，多半是网络问题，见 [FAQ Q7](#八常见问题faq)。
 
-杯子/盘子网格以压缩包形式提供，需解压：
+**验证安装是否成功**（无报错即 OK）：
+
+```bash
+python -c "import mujoco, torch, lerobot; print('mujoco', mujoco.__version__); print('cuda ok:', torch.cuda.is_available())"
+```
+
+- 能打印出 `mujoco 3.1.6` 说明仿真库就绪。
+- `cuda ok: True` 说明显卡可用（可训练）；若是 `False`，仿真/回放仍能跑，但训练会很慢或失败，请检查显卡驱动与 CUDA。
+
+### 4. 解压物体资源（必做）
+
+杯子/盘子的网格模型以压缩包形式提供，**必须先解压**，否则加载场景时会报找不到 `plate_11` 的错误：
 
 ```bash
 cd asset/objaverse
-unzip plate_11.zip
+unzip plate_11.zip      # Windows 无 unzip 命令时，直接用资源管理器右键“解压到当前文件夹”
+cd ../..                # 回到项目根目录
 ```
 
-### 4. 关于"无显示器"的服务器
+解压后 `asset/objaverse/` 下应能看到 `plate_11/` 文件夹。
 
-遥操作脚本（`collect_data_act.py`、`collect_data_language.py`）需要弹出 MuJoCo 可视化窗口和键盘交互，**必须在带图形界面的机器上运行**。纯命令行的远程服务器适合跑训练（`train_vla.py`）和无需窗口的评估。
+### 5. 关于"无显示器"的服务器
+
+- **需要图形界面（有显示器/桌面）的脚本**：所有遥操作采集（`collect_data_act.py`、`collect_data_language.py`）和带窗口回放/部署的脚本（`visualize_*`、`deploy_*`），它们会弹出 MuJoCo 窗口并读键盘。
+- **纯命令行服务器即可**：训练脚本（`train_act.py`、`train_vla.py`）。
+
+> 如果只有一台无显示器的 GPU 服务器，可以在本地有屏幕的机器上采集数据，把数据拷到服务器训练；或直接使用第三章/第六章提到的 **Hugging Face 现成数据集**，跳过采集直接训练。
 
 ---
 
@@ -147,7 +202,7 @@ unzip plate_11.zip
 
 - **场景**：桌面上有一个/多个杯子和一个盘子。
 - **目标**：把杯子抓起来放到盘子上。
-- **成功判定**（见 `y_env.py::check_success`）：杯子与盘子水平距离 < 0.1 m、竖直距离 < 0.6 m、夹爪张开，且末端执行器抬升到高度 0.9 m 以上。三者同时满足才算成功。
+- **成功判定**（见 `SimpleEnv1.py::check_success`）：杯子与盘子水平距离 < 0.1 m、竖直距离 < 0.6 m、夹爪张开，且末端执行器抬升到高度 0.9 m 以上。三者同时满足才算成功。
 
 ### 2. 数据集格式（LeRobot Dataset）
 
@@ -179,7 +234,7 @@ demo_data/
     └── tasks.jsonl        # 任务（语言指令）列表
 ```
 
-仓库已附带 `demo_data_example/`（1 条回合、137 帧），可直接用于熟悉数据格式。
+如果你不想自己采集，Hugging Face 上有现成的语言条件数据集 [`Jeongeun/omy_pnp_language`](https://huggingface.co/datasets/Jeongeun/omy_pnp_language)，可直接下载用于熟悉数据格式或训练（下载方式见[步骤 2](#步骤-2回放与可视化数据visualize_data_actpy) 与[步骤 6](#步骤-6可视化语言条件数据visualize_data_languagepy)）。
 
 ### 3. 动作空间与状态空间
 
@@ -216,7 +271,7 @@ demo_data/
 - `init_ik_info` / `add_ik_info`：构建并登记 IK 目标（目标刚体/几何体的目标位置 `p_trgt` 与目标旋转 `R_trgt`）。
 - `get_dq_from_ik_info`：把所有目标的雅可比与位姿误差堆叠成增广方程，按指定关节列筛选后调用阻尼最小二乘求解关节增量 `dq`。
 - `plot_ik_info`：在窗口中可视化当前位姿与目标位姿。
-- `solve_ik`：**顶层入口**。迭代调用上述函数，每步对关节角做范围裁剪、正运动学更新，直到位姿误差收敛或达到最大迭代步数，返回求得的关节角。`y_env.py` 的 `reset` 和 `eef_pose` 模式下的 `step` 都依赖它。
+- `solve_ik`：**顶层入口**。迭代调用上述函数，每步对关节角做范围裁剪、正运动学更新，直到位姿误差收敛或达到最大迭代步数，返回求得的关节角。`SimpleEnv1.py` 的 `reset` 和 `eef_pose` 模式下的 `step` 都依赖它。
 
 ### 4.3 `transforms.py` —— 坐标与旋转变换工具
 
@@ -238,7 +293,7 @@ demo_data/
 - **图像与可视化**：`get_colors`、`load_image`/`save_png`、`imshows`（多图并排）、`depth_to_gray_img`、`add_title_to_img`（给图加标题，遥操作叠加层用到）。
 - **XML 与其他**：`get_xml_string_from_path`、`prettify`（美化 MuJoCo XML）、`TicTocClass`（计时器）、`get_monitor_size`、`sleep`。
 
-### 4.5 `y_env.py` —— 单物体抓放环境 `SimpleEnv`
+### 4.5 `SimpleEnv1.py` —— 单物体抓放环境 `SimpleEnv`
 
 把底层 `MuJoCoParserClass` 进一步封装成"任务级"环境，接口风格接近 Gym：
 
@@ -269,7 +324,7 @@ demo_data/
 | `空格` | 切换夹爪开/合 |
 | `Z` | 重置环境并丢弃当前回合 |
 
-### 4.6 `y_env2.py` —— 语言条件多物体环境 `SimpleEnv2`
+### 4.6 `SimpleEnv2.py` —— 语言条件多物体环境 `SimpleEnv2`
 
 在 `SimpleEnv` 基础上扩展为**语言条件**任务，主要差异：
 
@@ -283,18 +338,51 @@ demo_data/
 
 ## 五、完整工作流程与运行步骤
 
-下面按教程顺序逐个讲解。**带界面的步骤（1、5 遥操作，以及各部署/可视化脚本）请在本地图形机上运行；训练（步骤 3 与 `train_vla.py`）在 GPU 机上运行。**
+### 运行前必读
 
-原教程的 8 个 Jupyter 笔记本已转换为整理好的、可直接运行的 `.py` 脚本（保留中文注释与分节说明，markdown 说明转为注释块，原笔记本里的 `!pip` / `!git` / `!python` 等终端命令已注释并标注"[终端命令]"，请按需在终端单独执行）。运行方式统一为：
+1. **每次开新终端，先激活环境、再进项目根目录**：
+   ```bash
+   conda activate lerobot          # 命令行前应出现 (lerobot)
+   cd /path/to/lerobot_mujoco      # 换成你的项目实际路径
+   ```
+2. **所有脚本都在项目根目录下用 `python 子文件夹/脚本名.py` 运行**，例如 `python act/train_act.py`。
+   每个脚本顶部都有"环境自举"代码，会自动把根目录加入搜索路径、并切到根目录，所以 `import mujoco_env`、`./asset`、`./demo_data`、`./ckpt` 等路径都能正确找到——你不用关心当前在哪个目录，只要保证从根目录调用即可。
+3. 这些 `.py` 脚本由原教程的 8 个 Jupyter 笔记本转换而来，**自上而下顺序执行**（等价于按顺序跑完 notebook 所有单元）。脚本里以 `!pip` / `!git` 开头的原终端命令已被注释并标注"[终端命令]"，需要时在终端单独执行。
+4. **遥操作脚本（步骤 1、5）会弹出 MuJoCo 窗口进入键盘控制循环，关闭窗口即结束。**
 
-```bash
-conda activate lerobot
-python act/collect_data_act.py      # 把文件名换成对应步骤的脚本即可
-```
+### 我该按什么顺序跑？（两条路线，任选其一先跑通）
 
-> 脚本是自上而下顺序执行的（等价于按顺序运行 notebook 的所有单元）。遥操作脚本（1、5）会进入键盘控制的主循环，关闭 MuJoCo 窗口即结束。
+> **路线 A · 入门（推荐先跑）——ACT，无需语言、单相机、本地可训：**
+> 步骤 1 采集 → 步骤 2 回放检查 → 步骤 3 训练 → 步骤 4 部署。
+>
+> ```bash
+> python act/collect_data_act.py      # 步骤1：键盘遥操作采集（需显示器）
+> python act/visualize_data_act.py    # 步骤2：回放核对数据（需显示器）
+> python act/train_act.py             # 步骤3：训练（需 GPU，约 30~60 分钟）
+> python act/deploy_act.py            # 步骤4：部署自动执行（需显示器）
+> ```
+>
+> **路线 B · 进阶——π0 / SmolVLA，语言条件 VLA：**
+> 步骤 5 采集 → 步骤 6 回放 → `train_vla.py` 训练 → `deploy_pi0/​smolvla` 部署。
+>
+> ```bash
+> python vla/collect_data_language.py                         # 步骤5：采集带语言指令的数据
+> python vla/visualize_data_language.py                       # 步骤6：回放核对
+> python vla/train_vla.py --config_path config/pi0_omy.yaml   # 训练 π0（需 GPU）
+> python vla/deploy_pi0.py                                    # 部署 π0
+> ```
+
+> **不想自己采集 / 没 GPU 怎么办？**
+> - 没数据：可直接下载 Hugging Face 现成数据集（步骤 2、6 给出命令），跳过采集直接训练/回放。
+> - 没 GPU：作者提供了预训练检查点（见[步骤 4](#步骤-4部署-act-策略deploy_actpy)），下载后直接跑部署步骤即可看效果。
+
+下面按教程顺序逐个讲解每个步骤的命令与原理。
 
 ### 步骤 1：采集示教数据（`collect_data_act.py`）
+
+```bash
+python act/collect_data_act.py      # 需要显示器；弹出窗口后用键盘遥操作，按下方按键表操作
+```
 
 用键盘遥操作机械臂完成"把杯子放到盘子上"，并存成 LeRobot 数据集。
 
@@ -309,9 +397,13 @@ python act/collect_data_act.py      # 把文件名换成对应步骤的脚本即
 3. 主循环以 20 Hz 运行：`teleop_robot()` 读键盘 → 每帧 `get_ee_pose()` + `grab_image()` 取状态和图像（缩放到 256×256）→ `step(action)` 解算关节角 → `dataset.add_frame(...)` 记录这一帧。
 4. `check_success()` 判定成功后 `save_episode()` 保存该回合；按 `Z` 则 `clear_episode_buffer()` 丢弃重来。
 
-数据默认存到 `./demo_data`。**没有手柄/不想手动采集也没关系**——仓库自带 `demo_data_example/`，且 Hugging Face 上有现成数据集（见[第六章](#六模型原理详解)末尾链接）。
+数据默认存到 `./demo_data`。**不想手动采集也没关系**——Hugging Face 上有现成数据集（见[第六章](#六模型原理详解)末尾链接），下载后即可用于后续步骤。
 
 ### 步骤 2：回放与可视化数据（`visualize_data_act.py`）
+
+```bash
+python act/visualize_data_act.py    # 需要显示器；默认读取步骤1采集的 ./demo_data
+```
 
 读取已采集的数据集，在重建的仿真场景里**回放动作**并核对：
 
@@ -321,9 +413,19 @@ python act/collect_data_act.py      # 把文件名换成对应步骤的脚本即
 2. `SimpleEnv` 按数据集里的物体初始位姿重置场景。
 3. 逐帧取出 `action` 驱动机器人回放，同时把数据集中记录的相机图像作为叠加图显示在窗口角落，直观比对"记录的画面"与"重放的仿真"。
 
+> **没有自己采集的数据？** 脚本默认读取 `./demo_data`。你可以先下载一份现成数据集再把 `root` 指向它：
+> ```bash
+> # 在项目根目录执行，把数据集下载到 ./omy_pnp_language 文件夹
+> git lfs install
+> git clone https://huggingface.co/datasets/Jeongeun/omy_pnp_language
+> ```
+> 然后把脚本里的 `root='./demo_data'` 改成 `root='./omy_pnp_language'` 即可回放。
+
 ### 步骤 3：训练 ACT 模型（`train_act.py`）
 
-> 在 GPU 机上运行，约需 30~60 分钟。
+```bash
+python act/train_act.py     # 需要 NVIDIA GPU，约需 30~60 分钟
+```
 
 在自定义数据集上训练 **ACT（Action Chunking Transformer，动作分块 Transformer）**：
 
@@ -338,6 +440,10 @@ python act/collect_data_act.py      # 把文件名换成对应步骤的脚本即
 
 ### 步骤 4：部署 ACT 策略（`deploy_act.py`）
 
+```bash
+python act/deploy_act.py    # 需要显示器；从 ./ckpt/act_y 加载模型并自动执行
+```
+
 把训练好的 ACT 检查点放回仿真自动执行（rollout）：
 
 <img src="media/rollout.gif" width="480" height="360">
@@ -350,23 +456,46 @@ python act/collect_data_act.py      # 把文件名换成对应步骤的脚本即
 
 ### 步骤 5：采集语言条件数据（`collect_data_language.py`）
 
+```bash
+python vla/collect_data_language.py     # 需要显示器；数据默认存到 ./demo_data_language
+```
+
 与步骤 1 类似，但环境换成 `SimpleEnv2`（`example_scene_y2.xml`，多个不同颜色杯子 + 盘子）。**关键区别**：每帧通过 `dataset.add_frame(..., task=指令)` 写入自然语言指令，使数据集支持训练能听懂指令的语言条件策略。按键操作与步骤 1 完全相同。
 
 <img src="media/data_v2.gif" width="480" height="360">
 
 ### 步骤 6：可视化语言条件数据（`visualize_data_language.py`）
 
-与步骤 2 类似，但针对语言条件数据集：可选地先从 Hugging Face 下载示例数据集，再用 `SimpleEnv2` 逐帧回放，叠加显示智能体视角与腕部相机图，核对采集质量。
+```bash
+python vla/visualize_data_language.py   # 需要显示器；默认读取 ./demo_data_language
+```
+
+与步骤 2 类似，但针对语言条件数据集，用 `SimpleEnv2` 逐帧回放，叠加显示智能体视角与腕部相机图，核对采集质量。
+
+> **没有自己采集的数据？** 同步骤 2，先下载现成数据集再改 `root`：
+> ```bash
+> git lfs install
+> git clone https://huggingface.co/datasets/Jeongeun/omy_pnp_language
+> ```
+> 然后把脚本里的 `ROOT = "./demo_data_language"` 改成 `ROOT = "./omy_pnp_language"`。**这份数据集也正是训练 π0 / SmolVLA（步骤 7、8）所用的数据。**
 
 ### 步骤 7：训练并部署 π0（`train_vla.py` + `deploy_pi0.py`）
 
 **训练（GPU 机）：**
 
 ```bash
-python vla/train_vla.py --config_path pi0_omy.yaml
+python vla/train_vla.py --config_path config/pi0_omy.yaml   # 训练 π0，检查点存到 ./ckpt/pi0_omy
 ```
 
-**部署（`deploy_pi0.py`）：** 加载微调好的 π0 策略，在 `SimpleEnv2` 语言条件环境中执行。与 ACT 部署的**关键区别**：观测字典里必须额外提供语言指令（`task` 字段），π0 据此决定要操作哪个杯子。
+> 首次运行会自动从 Hugging Face 下载 π0 预训练权重 `lerobot/pi0`（需联网，体积较大）。训练前请确认配置文件里 `dataset.root` 指向的数据集已存在（自己采集的 `./demo_data_language`，或下载的现成数据集）。
+
+**部署（`deploy_pi0.py`）：**
+
+```bash
+python vla/deploy_pi0.py    # 需要显示器；从 ./ckpt/pi0_omy/checkpoints/last/pretrained_model 加载
+```
+
+加载微调好的 π0 策略，在 `SimpleEnv2` 语言条件环境中执行。与 ACT 部署的**关键区别**：观测字典里必须额外提供语言指令（`task` 字段），π0 据此决定要操作哪个杯子。
 
 部署效果与训练日志：
 
@@ -378,10 +507,18 @@ python vla/train_vla.py --config_path pi0_omy.yaml
 **训练（GPU 机）：**
 
 ```bash
-python vla/train_vla.py --config_path smolvla_omy.yaml
+python vla/train_vla.py --config_path config/smolvla_omy.yaml   # 训练 SmolVLA，检查点存到 ./ckpt/smolvla_omy
 ```
 
-**部署（`deploy_smolvla.py`）：** 与步骤 7 流程一致，换成更轻量的 SmolVLA 策略。
+> 首次运行会自动下载 SmolVLA 基座权重 `lerobot/smolvla_base`（需联网）。
+
+**部署（`deploy_smolvla.py`）：**
+
+```bash
+python vla/deploy_smolvla.py    # 需要显示器；从 ./ckpt/smolvla_omy/checkpoints/last/pretrained_model 加载
+```
+
+与步骤 7 流程一致，换成更轻量的 SmolVLA 策略。
 
 部署效果与训练日志：
 
@@ -451,7 +588,7 @@ python vla/train_vla.py --config_path smolvla_omy.yaml
 
 ## 七、配置文件说明
 
-`pi0_omy.yaml` / `smolvla_omy.yaml` 供 `train_vla.py` 读取，字段含义：
+`config/pi0_omy.yaml` / `config/smolvla_omy.yaml` 供 `train_vla.py` 读取（通过 `--config_path` 指定），字段含义：
 
 ```yaml
 dataset:
@@ -493,16 +630,25 @@ A：DataLoader 多进程无法序列化 lambda。把 `num_workers` 设为 `0`（
 A：遥操作与带渲染窗口的脚本需要图形界面，请在本地有显示器的机器上跑。纯命令行服务器只适合 `train_vla.py` 训练和无窗口评估。
 
 **Q3：必须自己手动采集数据吗？**
-A：不必。仓库自带 `demo_data_example/`，且 Hugging Face 上有 `omy_pnp_language` 现成数据集；预训练检查点也可从[步骤 4](#步骤-4部署-act-策略deploy_actpy) 给出的 Google Drive 链接下载，直接跑部署步骤。
+A：不必。Hugging Face 上有现成的 `Jeongeun/omy_pnp_language` 数据集，下载后把脚本/配置里的 `root` 指向它即可（命令见[步骤 2](#步骤-2回放与可视化数据visualize_data_actpy)/[步骤 6](#步骤-6可视化语言条件数据visualize_data_languagepy)）；预训练检查点也可从[步骤 4](#步骤-4部署-act-策略deploy_actpy) 给出的 Google Drive 链接下载，直接跑部署步骤。
 
 **Q4：MuJoCo 版本有要求吗？**
 A：必须 **3.1.6**，其他版本可能与本项目的解析器/资源不兼容。
 
 **Q5：ACT、π0、SmolVLA 该选哪个入门？**
-A：先用 **ACT**（步骤 3-4，无需语言、单相机、本地可训）跑通全流程；理解后再上 π0 / SmolVLA 体验语言条件 VLA。
+A：先用 **ACT**（步骤 1-4，无需语言、单相机、本地可训）跑通全流程；理解后再上 π0 / SmolVLA 体验语言条件 VLA。
 
 **Q6：能换成自己的机器人/物体吗？**
-A：可以。准备好对应的 MJCF 模型放入 `asset/`，仿照 `example_scene_y*.xml` 拼场景，并相应调整 `y_env*.py` 里的刚体名（如 `tcp_link`、`body_obj_*`）、关节名和成功判定逻辑。
+A：可以。准备好对应的 MJCF 模型放入 `asset/`，仿照 `example_scene_y*.xml` 拼场景，并相应调整 `SimpleEnv1.py` / `SimpleEnv2.py` 里的刚体名（如 `tcp_link`、`body_obj_*`）、关节名和成功判定逻辑。
+
+**Q7：`pip install -r requirements.txt` 卡在安装 LeRobot 或 GitHub 连不上？**
+A：最后一行依赖需要从 GitHub 克隆 LeRobot。请确认网络能访问 GitHub；国内网络可考虑配置代理，或先手动 `git clone` LeRobot 仓库、`git checkout` 到 `requirements.txt` 里指定的 commit，再用 `pip install -e .` 本地安装，其余依赖照常 `pip install -r requirements.txt`。PyTorch 那几行从 `download.pytorch.org` 下载，慢的话可换用 CUDA 12.4 对应的国内镜像。
+
+**Q8：从 Hugging Face 下载数据集/权重很慢或失败？**
+A：`git clone` 大文件需要先 `git lfs install`（安装 Git LFS）。下载慢可设置镜像端点，例如运行脚本前执行 `export HF_ENDPOINT=https://hf-mirror.com`（Windows PowerShell：`$env:HF_ENDPOINT="https://hf-mirror.com"`）。
+
+**Q9：提示找不到 `plate_11` / 加载场景报缺文件？**
+A：忘记解压物体资源了。回到[环境安装步骤 4](#4-解压物体资源必做)解压 `asset/objaverse/plate_11.zip`。
 
 ---
 

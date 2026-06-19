@@ -70,7 +70,7 @@ import numpy as np                  # 数值计算库，这里主要用来处理
 import os                           # 操作系统相关，用来判断文件夹是否存在等
 from PIL import Image               # 图像处理库，用来把图片缩放到统一尺寸
 # SimpleEnv 是本教程自带的“仿真环境”封装类，负责管理 MuJoCo 里的机械臂、杯子、盘子、相机等。
-from mujoco_env.y_env import SimpleEnv
+from mujoco_env.SimpleEnv1 import SimpleEnv
 # LeRobotDataset 是 LeRobot 提供的数据集类，负责把采集到的每一帧按规定格式存盘。
 from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
 

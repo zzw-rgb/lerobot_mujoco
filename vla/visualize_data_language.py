@@ -164,7 +164,7 @@ dataloader = torch.utils.data.DataLoader(
 #   - xml_path：场景描述文件，定义了桌子、机械臂、待抓取物体等长什么样、放哪儿。
 #   - action_type='joint_angle'：动作的形式是“关节角度”——即每一帧告诉机械臂
 #     它的每个关节应该转到多少度（而不是末端坐标之类的其它表示方式）。
-from mujoco_env.y_env2 import SimpleEnv2
+from mujoco_env.SimpleEnv2 import SimpleEnv2
 xml_path = './asset/example_scene_y2.xml'
 PnPEnv = SimpleEnv2(xml_path, action_type='joint_angle')
 

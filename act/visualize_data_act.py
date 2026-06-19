@@ -68,7 +68,7 @@ from lerobot.common.datasets.utils import write_json, serialize_dict
 # 打开我们之前采集好的数据集。
 #   - 第一个参数 'omy_pnp' 是数据集名字（omy 机械臂的 pick-and-place 抓放任务）。
 #   - root 指定数据存放的文件夹。
-dataset = LeRobotDataset('omy_pnp', root='./demo_data') # 如果你想使用提供的示例数据，请改为 root = './demo_data_example'！
+dataset = LeRobotDataset('omy_pnp', root='./demo_data') # 若你还没自己采集数据，可下载 Hugging Face 现成数据集后把 root 指向它（见 README 第五章步骤 2）。
 
 # ======================================================================
 # ## 加载数据集
@@ -131,7 +131,7 @@ dataloader = torch.utils.data.DataLoader(
 
 # SimpleEnv：项目自带的“仿真环境”类，负责加载 MuJoCo 场景、推进物理、渲染画面、
 #            执行动作等。可以把它理解成一个“虚拟实验室”。
-from mujoco_env.y_env import SimpleEnv
+from mujoco_env.SimpleEnv1 import SimpleEnv
 # xml_path：场景描述文件。MuJoCo 用 XML 文件来定义机械臂、桌子、物体长什么样、摆在哪。
 # 这个文件描述的场景应当与当初采集数据时一致，回放才有意义。
 xml_path = './asset/example_scene_y.xml'
