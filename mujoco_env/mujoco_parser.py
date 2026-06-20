@@ -1,15 +1,39 @@
+# ============================================================================
+# 这个文件是整个 MuJoCo 机械臂仿真教程的“地基”。
+# 它把“用 MuJoCo 写仿真”时那些零碎、底层的操作，封装成一套统一、好用的接口。
+#
+# 几个最基础的概念（看完后面会反复用到）：
+#   - MuJoCo：一个物理仿真引擎，可以模拟机器人/物体在虚拟世界里的运动、碰撞、重力等。
+#   - model：场景/机器人的“静态定义”，从 XML 文件解析而来。它描述了有哪些刚体、关节、
+#            几何体、执行器、相机、传感器，以及它们的尺寸、初始位置等“不随时间变化的”信息。
+#   - data：当前“这一刻”的“动态状态”，比如每个关节现在转到了什么角度、速度多少、
+#            受到多大的力等。仿真每推进一步，data 都会更新，而 model 一般保持不变。
+#   - body（刚体）：构成机器人/场景的基本积木，比如机械臂的一节连杆。
+#   - joint（关节）：连接两个刚体、允许它们相对运动的部件，比如可以转动的轴。
+#   - geom（几何体）：刚体的“形状外壳”，用来做碰撞检测和显示（盒子、球、圆柱、网格等）。
+#   - actuator（执行器）：给关节施加力/力矩的“马达”，控制信号 ctrl 就是发给它们的。
+#   - site（标记点）：刚体上的一个“虚拟参考点”，不参与物理，常用来标记末端执行器位置等。
+#   - 齐次变换矩阵 T：一个 4x4 矩阵，能同时表示“位置 + 朝向”。左上 3x3 是旋转矩阵 R，
+#                     右上 3x1 是位置 p。后面经常用 T、R、p 这三个量描述物体的位姿。
+# ============================================================================
+
 import os
 import time
-import mujoco
+import mujoco   # MuJoCo 物理仿真引擎的 Python 接口
 import copy
-import glfw
+import glfw     # 跨平台的窗口/输入库，用来开仿真窗口、接收鼠标键盘事件
 import pathlib
-import cv2
+import cv2      # OpenCV，做图像处理（缩放、显示等）
 import numpy as np
-from threading import Lock
+from threading import Lock   # 线程锁，渲染时防止多线程同时改数据出错
 
+# 记录当前 MuJoCo 版本号（拆成数字元组，便于后面按版本做兼容处理）
 MUJOCO_VERSION = tuple(map(int,mujoco.__version__.split('.')))
 
+# 从本项目的工具模块里导入一批数学/坐标变换相关的辅助函数：
+#   t2p: 从齐次变换矩阵 T 取出位置 p；t2r: 取出旋转矩阵 R；pr2t: 由位置+旋转拼成 T；
+#   r2quat/quat2r: 旋转矩阵与四元数互转；r2w: 旋转矩阵转角速度向量；rpy2r: 欧拉角转旋转矩阵；
+#   meters2xyz: 深度图(米)转点云坐标；get_rotation_matrix_from_two_points: 由两点求朝向。
 from .transforms import (
     t2p,
     t2r,
@@ -22,16 +46,24 @@ from .transforms import (
     get_rotation_matrix_from_two_points,
 )
 from .utils import (
-    trim_scale,
-    compute_view_params,
-    get_idxs,
-    get_colors,
-    get_monitor_size,
-    TicTocClass,
+    trim_scale,            # 限幅缩放：把向量按比例缩放到不超过某个最大长度
+    compute_view_params,   # 由相机参数算出观察视角的辅助函数
+    get_idxs,              # 在一个名字列表里找出目标名字对应的下标
+    get_colors,            # 生成一组好看的颜色（画轨迹/多物体时用）
+    get_monitor_size,      # 获取显示器分辨率
+    TicTocClass,           # 简单的计时器（tic 开始、toc 结束）
 )
 
+# ============================================================================
+# MinimalCallbacks：最小化的“输入回调”基类。
+# 它本身不开窗口，只负责定义“当鼠标/键盘有动作时该怎么处理”的回调函数，
+# 并保存一堆交互状态（哪个键被按下、是否双击、是否暂停等）。
+# 下面的 MuJoCoMinimalViewer 会继承它，把这些回调挂到真正的窗口上。
+# 这样做的好处：把“事件处理逻辑”和“窗口/渲染逻辑”分开，结构更清晰。
+# ============================================================================
 class MinimalCallbacks:
     def __init__(self, hide_menus):
+        # __init__ 里把所有交互相关的状态变量初始化好（这些值会被回调函数不断更新）
         self._gui_lock                   = Lock()
         self._button_left_pressed        = False
         self._button_right_pressed       = False
@@ -90,12 +122,21 @@ class MinimalCallbacks:
         return
 
     def _cursor_pos_callback(self, window, xpos, ypos):
+        """
+            鼠标移动回调：当鼠标在窗口里移动时被调用。
+            作用：按住鼠标拖动来旋转/平移/缩放观察相机（或拖动物体施加扰动）。
+            xpos, ypos 是鼠标当前像素坐标。
+        """
+        # 如果没有按住左键或右键，就什么都不做（只有按住拖动才需要响应）
         if not (self._button_left_pressed or self._button_right_pressed):
             return
 
+        # 是否同时按住 Shift 键（按住 Shift 会切换“水平/垂直”这两种操作模式）
         mod_shift = (
             glfw.get_key(window, glfw.KEY_LEFT_SHIFT) == glfw.PRESS or
             glfw.get_key(window, glfw.KEY_RIGHT_SHIFT) == glfw.PRESS)
+        # 根据按下的是哪个键 + 是否按 Shift，决定这次拖动要做哪种操作：
+        #   右键 -> 平移相机（水平/垂直）；左键 -> 旋转相机（水平/垂直）
         if self._button_right_pressed:
             action = mujoco.mjtMouse.mjMOUSE_MOVE_H if mod_shift else mujoco.mjtMouse.mjMOUSE_MOVE_V
         elif self._button_left_pressed:
@@ -103,11 +144,14 @@ class MinimalCallbacks:
         else:
             action = mujoco.mjtMouse.mjMOUSE_ZOOM
 
+        # 计算鼠标这一帧相对上一帧移动了多少（dx, dy），作为相机移动量
         dx = int(self._scale * xpos) - self._last_mouse_x
         dy = int(self._scale * ypos) - self._last_mouse_y
         width, height = glfw.get_framebuffer_size(window)
 
+        # 加锁，避免渲染线程和这里同时改场景数据
         with self._gui_lock:
+            # 如果当前正在“拖动物体施加扰动”，就移动扰动；否则移动观察相机
             if self.pert.active:
                 mujoco.mjv_movePerturb(
                     self.model,
@@ -130,9 +174,17 @@ class MinimalCallbacks:
         self._last_mouse_y = int(self._scale * ypos)
 
     def _mouse_button_callback(self, window, button, act, mods):
+        """
+            鼠标按键回调：鼠标按下/松开时被调用。
+            主要做三件事：1) 记录左右键是否处于“按下”状态；
+            2) 检测是否发生“双击”（用两次点击的时间差判断）；
+            3) 处理“按住 Ctrl + 拖动”给物体施加力的扰动操作。
+        """
+        # 记录左/右键当前是否被按下（按下=True，松开=False）
         self._button_left_pressed = button == glfw.MOUSE_BUTTON_LEFT and act == glfw.PRESS
         self._button_right_pressed = button == glfw.MOUSE_BUTTON_RIGHT and act == glfw.PRESS
 
+        # 记录按下时鼠标的位置，作为后续拖动的参考起点
         x, y = glfw.get_cursor_pos(window)
         self._last_mouse_x = int(self._scale * x)
         self._last_mouse_y = int(self._scale * y)
@@ -146,6 +198,7 @@ class MinimalCallbacks:
             if self._last_left_click_time is None:
                 self._last_left_click_time = glfw.get_time()
 
+            # 两次左键点击间隔在 0.01~0.3 秒之间，就认定为一次“双击”
             time_diff = (time_now - self._last_left_click_time)
             if time_diff > 0.01 and time_diff < 0.3:
                 self._left_double_click_pressed = True
@@ -160,7 +213,7 @@ class MinimalCallbacks:
                 self._right_double_click_pressed = True
             self._last_right_click_time = time_now
 
-        # 设置扰动
+        # 设置扰动：按住 Ctrl 键时，可以用鼠标“抓住”物体并拖动施加外力
         key = mods == glfw.MOD_CONTROL
         newperturb = 0
         if key and self.pert.select > 0:
@@ -180,16 +233,27 @@ class MinimalCallbacks:
             self.pert.active = 0
 
     def _scroll_callback(self, window, x_offset, y_offset):
+        """
+            鼠标滚轮回调：滚动滚轮时拉近/拉远观察相机（缩放视图）。
+            y_offset 是滚轮滚动量，乘以 -0.05 作为缩放步长。
+        """
         with self._gui_lock:
             mujoco.mjv_moveCamera(
                 self.model, mujoco.mjtMouse.mjMOUSE_ZOOM, 0, -0.05 * y_offset, self.scn, self.cam)
 
+# ============================================================================
+# MuJoCoMinimalViewer：一个“最小化的可视化窗口”。
+# 它负责真正开一个 GLFW 窗口，把 MuJoCo 的场景画出来，并接收鼠标键盘交互
+# （旋转/平移/缩放视角、拖动物体、显示文字和小图等）。
+# 它继承自上面的 MinimalCallbacks，复用那套输入回调逻辑。
+# 主类 MuJoCoParserClass 内部会创建并使用这个 viewer 来显示画面。
+# ============================================================================
 class MuJoCoMinimalViewer(MinimalCallbacks):
     def __init__(
             self,
-            model,
-            data,
-            mode              = 'window',
+            model,            # MuJoCo 模型（场景静态定义）
+            data,             # MuJoCo 数据（当前动态状态）
+            mode              = 'window',   # 渲染模式，目前只支持开窗口 'window'
             title             = "MuJoCo Minimal Viewer",
             width             = None,
             height            = None,
@@ -200,8 +264,10 @@ class MuJoCoMinimalViewer(MinimalCallbacks):
             use_rgb_overlay   = True,
             loc_rgb_overlay   = 'top right',
         ):
+        # 先调用父类构造函数，初始化那一堆交互状态变量
         super().__init__(hide_menus)
 
+        # 保存模型与数据的引用（注意是引用，外面更新 data，这里看到的也会同步更新）
         self.model = model
         self.data = data
         self.render_mode = mode
@@ -215,9 +281,10 @@ class MuJoCoMinimalViewer(MinimalCallbacks):
         self.CONFIG_PATH = pathlib.Path.joinpath(
             pathlib.Path.home(), ".config/mujoco_viewer/config.yaml")
 
-        # glfw 初始化
+        # glfw 初始化（启动窗口系统）
         glfw.init()
 
+        # 如果没指定窗口宽/高，就默认用主显示器的分辨率（全屏大小）
         if not width:
             width, _ = glfw.get_video_mode(glfw.get_primary_monitor()).size
 
@@ -228,11 +295,11 @@ class MuJoCoMinimalViewer(MinimalCallbacks):
             glfw.window_hint(glfw.VISIBLE, 0)
 
         # 创建窗口
-        self.maxgeom = maxgeom
+        self.maxgeom = maxgeom   # 场景里最多能画多少个几何体（包括我们额外画的箭头/球等）
         self.window = glfw.create_window(
             width, height, title, None, None)
-        glfw.make_context_current(self.window)
-        glfw.swap_interval(1)
+        glfw.make_context_current(self.window)   # 把这个窗口设为当前 OpenGL 绘图目标
+        glfw.swap_interval(1)                     # 开启垂直同步，避免画面撕裂
 
         framebuffer_width, framebuffer_height = glfw.get_framebuffer_size(
             self.window)
@@ -250,18 +317,19 @@ class MuJoCoMinimalViewer(MinimalCallbacks):
             glfw.set_scroll_callback(self.window, self._scroll_callback)
             glfw.set_key_callback(self.window, self._key_callback)
 
-        # 创建选项、相机、场景、上下文
-        self.vopt = mujoco.MjvOption()
-        self.cam  = mujoco.MjvCamera()
-        self.scn  = mujoco.MjvScene(self.model, maxgeom=self.maxgeom)
-        self.pert = mujoco.MjvPerturb()
+        # 创建渲染需要的几个核心对象：
+        self.vopt = mujoco.MjvOption()    # 可视化选项（显示哪些元素、线框/接触点等开关）
+        self.cam  = mujoco.MjvCamera()    # 观察相机（视角的位置、朝向、距离）
+        self.scn  = mujoco.MjvScene(self.model, maxgeom=self.maxgeom)  # 场景缓冲区，存放要画的几何体
+        self.pert = mujoco.MjvPerturb()   # 扰动对象（鼠标拖物体施加外力时用）
 
+        # 渲染上下文：把场景真正画到 OpenGL 上所需的资源（字体大小用 150%）
         self.ctx = mujoco.MjrContext(
             self.model, mujoco.mjtFontScale.mjFONTSCALE_150.value)
 
         width, height = glfw.get_framebuffer_size(self.window)
         
-        # 图表
+        # 图表：可以在窗口上叠加显示实时曲线图（比如画关节角度随时间变化）
         self.n_fig = n_fig
         self.figs  = []
         for idx in range(self.n_fig):
@@ -294,9 +362,15 @@ class MuJoCoMinimalViewer(MinimalCallbacks):
         self.perturbation = perturbation
 
     def add_marker(self, **marker_params):
+        """ 往待绘制列表里追加一个“标记”（比如一个球、箭头），下次渲染时画出来 """
         self._markers.append(marker_params)
 
     def _add_marker_to_scene(self, marker):
+        """
+            把一个标记真正写进场景缓冲区 scn。这是底层细节：从空闲槽位取一个 geom，
+            填入它的类型、位置、朝向、尺寸、颜色等，让 MuJoCo 渲染时把它画出来。
+        """
+        # 场景里能画的几何体数量有上限，超了就报错
         if self.scn.ngeom >= self.scn.maxgeom:
             raise RuntimeError(
                 'Ran out of geoms. maxgeom: %d' %
@@ -355,11 +429,17 @@ class MuJoCoMinimalViewer(MinimalCallbacks):
         return
 
     def apply_perturbations(self):
+        """ 把用户用鼠标拖拽产生的扰动力，施加到物体上（先清零外力，再加扰动位姿和力） """
         self.data.xfrc_applied = np.zeros_like(self.data.xfrc_applied)
         mujoco.mjv_applyPerturbPose(self.model, self.data, self.pert, 0)
         mujoco.mjv_applyPerturbForce(self.model, self.data, self.pert)
 
     def read_pixels(self, camid=None, depth=False):
+        """
+            从渲染缓冲读取像素，得到一张图片（离屏渲染时用；'window' 模式下不支持）。
+            camid: 用哪个相机；depth=True 时同时返回深度图。
+            返回的图像做了上下翻转（OpenGL 的像素是上下颠倒的）。
+        """
         if self.render_mode == 'window':
             raise NotImplementedError(
                 "Use 'render()' in 'window' mode.")
@@ -404,7 +484,8 @@ class MuJoCoMinimalViewer(MinimalCallbacks):
             text2   = '',
         ):
         """
-            添加叠加层
+            添加叠加层：在窗口的某个角落叠加显示一行/两行文字（text1 主文字，text2 副文字）。
+            loc 指定显示位置（上/上右/上左/下/下右/下左）。
             loc: ['top','top right','top left','bottom','bottom right','bottom left']
             用法:
                 env.viewer.add_overlay(gridpos=mujoco.mjtGridPos.mjGRID_TOPLEFT,text1='TopLeft')
@@ -483,7 +564,8 @@ class MuJoCoMinimalViewer(MinimalCallbacks):
         
     def add_rgb_overlay(self,rgb_img_raw,fix_ratio=False):
         """
-            设置要渲染的 RGB 图像
+            设置要叠加显示的 RGB 小图（比如把腕部相机看到的画面贴到窗口角落）。
+            会把图缩放到窗口的 1/4 大小；fix_ratio=True 时保持原图宽高比并居中、四周补黑边。
         """
         width,height = glfw.get_framebuffer_size(self.window)
         rgb_h,rgb_w = height//4,width//4
@@ -511,6 +593,8 @@ class MuJoCoMinimalViewer(MinimalCallbacks):
 
     def plot_rgb_overlay(self,rgb=None,loc='top right'):
         """
+            把一张 RGB 图缩放后保存到指定角落（top/bottom + left/right），下次渲染时贴上去。
+            和 add_rgb_overlay 类似，但支持四个角分别独立放图。
             loc:['top right','top left','bottom right','bottom left']
         """
         w_window,h_window = glfw.get_framebuffer_size(self.window)
@@ -545,6 +629,7 @@ class MuJoCoMinimalViewer(MinimalCallbacks):
 
     def reset_rgb_overlay(self,loc=None):
         """
+            清除叠加的 RGB 小图。loc=None 时清除四个角，否则只清除指定角。
             loc:['top right','top left','bottom right','bottom left']
         """
         if loc is None:
@@ -563,13 +648,21 @@ class MuJoCoMinimalViewer(MinimalCallbacks):
                 self.rgb_overlay_bottom_left = None
     
     def render(self):
+        """
+            渲染一帧：把当前 MuJoCo 场景画到窗口里。
+            完整流程是“更新场景 -> 渲染几何体 -> 叠加文字/曲线/小图 -> 交换缓冲显示”。
+            这是 viewer 最核心的方法，每个仿真步循环里都会被调用来刷新画面。
+        """
+        # 窗口必须还活着才能渲染
         if not self.is_alive:
             raise Exception(
                 "GLFW window does not exist but you tried to render.")
+        # 如果用户点了关闭按钮，就关闭窗口并返回
         if glfw.window_should_close(self.window):
             self.close()
             return
 
+        # 内部函数 update：真正完成“更新场景 + 渲染”的所有步骤
         # mjv_updateScene, mjr_render, mjr_overlay
         def update():
 
@@ -582,7 +675,7 @@ class MuJoCoMinimalViewer(MinimalCallbacks):
             self.viewport.width, self.viewport.height = width, height
 
             with self._gui_lock:
-                # 更新场景
+                # 更新场景：根据当前 data（物体位置等）把要画的几何体填进 scn 缓冲区
                 mujoco.mjv_updateScene(
                     self.model,
                     self.data,
@@ -591,10 +684,10 @@ class MuJoCoMinimalViewer(MinimalCallbacks):
                     self.cam,
                     mujoco.mjtCatBit.mjCAT_ALL.value,
                     self.scn)
-                # 标记项目
+                # 把我们额外添加的标记（球/箭头等）也加进场景
                 for marker in self._markers:
                     self._add_marker_to_scene(marker)
-                # 渲染
+                # 渲染：把场景缓冲区里的几何体真正画到屏幕上
                 mujoco.mjr_render(self.viewport, self.scn, self.ctx)
 
                 # 叠加层项目
@@ -705,13 +798,14 @@ class MuJoCoMinimalViewer(MinimalCallbacks):
                         con      = self.ctx,
                     )
                 
-                # 双缓冲
+                # 双缓冲：把刚画好的“后台缓冲”交换到屏幕上显示（避免画面闪烁）
                 glfw.swap_buffers(self.window)
-            glfw.poll_events()
+            glfw.poll_events()   # 处理累积的鼠标/键盘事件
+            # 用指数平滑估计每帧渲染耗时（用于控制仿真与渲染速度的同步）
             self._time_per_render = 0.9 * self._time_per_render + \
                 0.1 * (time.time() - render_start)
 
-        if self._paused: # 如果已暂停
+        if self._paused: # 如果已暂停：停在原地反复刷新画面，直到取消暂停或单步前进
             while self._paused:
                 update()
                 if glfw.window_should_close(self.window):
@@ -721,18 +815,19 @@ class MuJoCoMinimalViewer(MinimalCallbacks):
                     self._advance_by_one_step = False
                     break
         else:
+            # 未暂停：根据仿真步长与渲染耗时的比例决定这次要刷新几帧
             self._loop_count += self.model.opt.timestep / \
                 (self._time_per_render * self._run_speed)
-            if self._render_every_frame:
+            if self._render_every_frame:  # 若设置成每帧都渲染，则固定刷新一次
                 self._loop_count = 1
             while self._loop_count > 0:
                 update()
                 self._loop_count -= 1
 
-        # 清除标记
+        # 清除标记（标记是“一次性”的，画完就清空，下一帧重新添加）
         self._markers[:] = []
 
-        # 清除叠加层
+        # 清除叠加层文字
         self._overlay.clear()
 
         # 施加扰动（这一步是否应该放在 mj_step 之前？）
@@ -740,22 +835,41 @@ class MuJoCoMinimalViewer(MinimalCallbacks):
             self.apply_perturbations()
 
     def close(self):
+        """ 关闭窗口：标记为已死，释放 GLFW 和渲染上下文资源 """
         self.is_alive = False
         glfw.terminate()
         self.ctx.free()
 
 
+# ============================================================================
+# MuJoCoParserClass：整个项目最核心的类，是“仿真封装地基”。
+#
+# 它把“用 MuJoCo 写仿真”时一堆零散、底层的操作打包成统一、好用的接口，
+# 让上层教程代码可以用简单的方法名（如 env.step()、env.get_p_body('hand')）
+# 来加载模型、推进物理、读写位姿、渲染画面、做逆运动学、处理键鼠交互等。
+#
+# 典型使用流程：
+#   env = MuJoCoParserClass(rel_xml_path='...')  # 加载场景，解析模型
+#   env.reset()                                  # 复位到初始状态
+#   env.init_viewer()                            # 打开可视化窗口
+#   while env.is_viewer_alive():                 # 主循环
+#       env.step(ctrl=...)                       # 施加控制并推进一步物理
+#       env.render()                             # 刷新画面
+#
+# 名字里的 "Parser（解析器）" 指它会解析 XML 模型文件，建立“名字 -> 索引”的映射表，
+# 这样我们就能用人类可读的名字（如 'panda_hand'）去操作物体，而不必记一堆数字编号。
+# ============================================================================
 class MuJoCoParserClass(object):
     """
         MuJoCo 解析器类
     """
     def __init__(
             self,
-            name          = None,
-            rel_xml_path  = None,
-            xml_string    = None,
-            assets        = None,
-            verbose       = True,
+            name          = None,         # 给这个仿真环境起的名字（不填则用模型名）
+            rel_xml_path  = None,         # XML 模型文件的相对路径（二选一：路径 或 字符串）
+            xml_string    = None,         # 直接以字符串形式给出的 XML 内容
+            assets        = None,         # 配套资源（网格、贴图等），配合 xml_string 使用
+            verbose       = True,         # 是否在初始化时打印模型信息
         ):
         """
             初始化 MuJoCo 解析器
@@ -767,11 +881,11 @@ class MuJoCoParserClass(object):
         self.verbose      = verbose
 
         # 常量
-        self.tick              = 0
-        self.render_tick       = 0
-        self.use_mujoco_viewer = False
+        self.tick              = 0       # 仿真步计数器（每 step 一次加一）
+        self.render_tick       = 0       # 渲染帧计数器
+        self.use_mujoco_viewer = False   # 当前是否已打开可视化窗口
 
-        # 解析 xml 文件
+        # 解析 xml 文件：加载模型、建立各种名字到索引的映射（核心步骤，见 _parse_xml）
         if (self.rel_xml_path is not None) or (self.xml_string is not None):
             self._parse_xml()
         if self.name is None:
@@ -792,24 +906,33 @@ class MuJoCoParserClass(object):
 
     def _parse_xml(self):
         """
-            解析 xml 文件
+            解析 XML 模型文件，这是整个类的“开机”步骤，非常关键。做的事情包括：
+            1) 从 XML 路径或字符串加载出 model（静态定义）和 data（动态状态）；
+            2) 统计场景里有多少刚体 body、关节 joint、几何体 geom、执行器 actuator、
+               相机、传感器等，并把它们的“名字”和“整数索引”一一对应起来，
+               存成一堆列表/字典（如 self.body_names、self.joint_names ...）。
+            为什么要建这些映射？因为 MuJoCo 内部都用整数索引操作，而我们人更习惯用名字，
+            有了映射表，后面就能写 env.get_p_body('hand') 这样直观的代码。
         """
+        # 方式一：从 XML 文件路径加载
         if self.rel_xml_path is not None:
             self.full_xml_path = os.path.abspath(os.path.join(os.getcwd(),self.rel_xml_path))
             self.model         = mujoco.MjModel.from_xml_path(self.full_xml_path)
-        
+
+        # 方式二：直接从 XML 字符串加载（配合 assets 资源）
         if self.xml_string is not None:
             self.model = mujoco.MjModel.from_xml_string(xml=self.xml_string,assets=self.assets)
-            
+
         # 解析 xml 模型名称
         parsed_strings = [s for s in self.model.names.split(b'\x00') if s]
         parsed_strings = [s.decode('utf-8') for s in parsed_strings]
         self.model_name = parsed_strings[0]
 
-        self.data             = mujoco.MjData(self.model)
-        self.dt               = self.model.opt.timestep
-        self.HZ               = int(1/self.dt)
+        self.data             = mujoco.MjData(self.model)   # 创建动态数据容器（当前状态）
+        self.dt               = self.model.opt.timestep      # 每一仿真步代表多少“仿真时间”（秒）
+        self.HZ               = int(1/self.dt)               # 仿真频率（每秒多少步）
 
+        # 积分器：决定物理方程怎么往前“算”，常见有欧拉法(EULER)和四阶龙格库塔(RK4)
         # 积分器 (https://mujoco.readthedocs.io/en/latest/APIreference/APItypes.html#mjtintegrator)
         self.integrator       = self.model.opt.integrator
         if self.integrator == mujoco.mjtIntegrator.mjINT_EULER:
@@ -824,6 +947,8 @@ class MuJoCoParserClass(object):
             self.integrator_name = 'UNKNOWN'
         
         # 状态空间和动作空间
+        # qpos：所有关节的“位置/角度”拼成的大向量；qvel：所有关节的“速度”向量。
+        # 注意 nq 和 nv 不一定相等（自由关节用 4 元数表示朝向占 7 个 qpos，但只占 6 个 qvel）。
         self.n_qpos           = self.model.nq # 状态数量
         self.n_qvel           = self.model.nv # 速度数量（切空间维度）
         self.n_qacc           = self.model.nv # 加速度数量（切空间维度）
@@ -856,7 +981,10 @@ class MuJoCoParserClass(object):
         self.dof_names        = [mujoco.mj_id2name(self.model,mujoco.mjtObj.mjOBJ_DOF,dof_idx)
                                  for dof_idx in range(self.n_dof)]
 
-        # 关节
+        # 关节：下面把关节按类型分类。MuJoCo 关节主要有几种：
+        #   FREE 自由关节（6 自由度，物体可自由漂浮，如一个被抓的方块）
+        #   HINGE 旋转关节（绕轴转动，机械臂的关节多是这种）
+        #   SLIDE 滑动关节（沿轴平移，如夹爪开合）
         self.n_joint          = self.model.njnt # 关节数量
         self.joint_names      = [mujoco.mj_id2name(self.model,mujoco.mjtObj.mjOBJ_JOINT,joint_idx)
                                  for joint_idx in range(self.n_joint)]
@@ -894,7 +1022,8 @@ class MuJoCoParserClass(object):
         self.rev_pri_joint_maxs   = np.concatenate([self.rev_joint_maxs,self.pri_joint_maxs])
         self.rev_pri_joint_ranges = self.rev_pri_joint_maxs - self.rev_pri_joint_mins
         
-        # 控制（执行器）
+        # 控制（执行器）：actuator 就是“马达”，我们发给它控制信号 ctrl，它给关节施加力/力矩。
+        # ctrl_ranges 是每个执行器允许的控制值范围，超出会被截断。
         self.n_ctrl           = self.model.nu # 执行器（或控制）数量
         self.ctrl_names       = [mujoco.mj_id2name(self.model,mujoco.mjtObj.mjOBJ_ACTUATOR,ctrl_idx)
                                  for ctrl_idx in range(self.n_ctrl)]
@@ -903,9 +1032,10 @@ class MuJoCoParserClass(object):
         self.ctrl_maxs        = self.ctrl_ranges[:,1]
         self.ctrl_gears       = self.model.actuator_gear[:,0] # 传动比
 
-        # 相机
+        # 相机：场景里定义的固定相机（比如俯视相机、腕部相机）。这里给每个相机建一个
+        # MjvCamera 观察对象，并记录它的视场角 fovy（决定“看得多宽”）和视口大小。
         self.n_cam            = self.model.ncam
-        self.cam_names        = [mujoco.mj_id2name(self.model,mujoco.mjtObj.mjOBJ_CAMERA,cam_idx) 
+        self.cam_names        = [mujoco.mj_id2name(self.model,mujoco.mjtObj.mjOBJ_CAMERA,cam_idx)
                                  for cam_idx in range(self.n_cam)]
         self.cams             = []
         self.cam_fovs         = []
@@ -923,6 +1053,8 @@ class MuJoCoParserClass(object):
             self.cam_viewports.append(viewport)
 
         # 与控制（执行器）关联的 qpos 和 qvel 索引
+        # 作用：建立“第几个执行器 -> 它控制的关节在 qpos/qvel 大向量里的下标”的对应。
+        # 有了它，就能方便地读出“被控关节的当前角度/速度”，做位置/速度控制时很常用。
         """
         # 用法
         self.env.data.qpos[self.env.ctrl_qpos_idxs] # 关节位置
@@ -953,12 +1085,12 @@ class MuJoCoParserClass(object):
             else:
                 self.ctrl_types.append('UNKNOWN(trntype=%d)'%(trntype))
                 
-        # 传感器
+        # 传感器：场景里定义的各种传感器（如力/位置/距离传感器），读数存在 data.sensordata
         self.n_sensor         = self.model.nsensor
         self.sensor_names     = [mujoco.mj_id2name(self.model,mujoco.mjtObj.mjOBJ_SENSOR,sensor_idx)
                                  for sensor_idx in range(self.n_sensor)]
 
-        # 站点（site）
+        # 站点（site）：刚体上的“虚拟参考点”，不参与物理碰撞，常用来标记末端、传感器位置等
         self.n_site           = self.model.nsite
         self.site_names       = [mujoco.mj_id2name(self.model,mujoco.mjtObj.mjOBJ_SITE,site_idx)
                                  for site_idx in range(self.n_site)]
@@ -1082,13 +1214,15 @@ class MuJoCoParserClass(object):
         
     def reset(self,step=True):
         """
-            重置
+            复位仿真：把所有关节位置/速度等动态状态恢复到初始值，并把各种计数器/计时器清零。
+            相当于“重新开始”，每次开始一段新仿真前通常都会先调用它。
+            参数 step：复位后是否立刻推进一步物理，让状态稳定下来。
         """
         time.sleep(1e-3) # 加一点延时？
-        mujoco.mj_resetData(self.model,self.data) # 重置数据
+        mujoco.mj_resetData(self.model,self.data) # 把 data 恢复到模型定义的初始状态
 
         if step:
-            mujoco.mj_step(self.model,self.data)
+            mujoco.mj_step(self.model,self.data)   # 推进一步物理，让状态进入有效初值
             # mujoco.mj_forward(self.model,self.data) # 前向 <= 这一步是否必要？
 
         # 重置计数器（tick）
@@ -1174,6 +1308,8 @@ class MuJoCoParserClass(object):
         返回:
             None
         """
+        # init_viewer：打开可视化窗口。内部会创建一个 MuJoCoMinimalViewer 实例（前面那个类），
+        # 然后通过 set_viewer 设置相机视角和各种显示开关（接触点、关节、几何体分组等）。
         self.use_mujoco_viewer = True
         if title is None: title = self.name
 
@@ -1440,18 +1576,23 @@ class MuJoCoParserClass(object):
         返回:
             None
         """
+        # step 是仿真主循环的“心跳”：把控制信号写进 data.ctrl，然后调用 mj_step 让
+        # MuJoCo 根据物理定律把整个场景的状态往前推进 nstep 小步（更新位置、速度等）。
         if step_flag:
             if ctrl is not None:
+                # 控制信号可以发给“全部执行器”，也可以只发给指定的若干个。
+                # 下面根据传入的是 ctrl_names（按执行器名）还是 joint_names（按关节名）
+                # 来确定要写入 data.ctrl 的下标位置。
                 if ctrl_names is not None: # 当显式给定 'ctrl_names' 时
                     ctrl_idxs = get_idxs(self.ctrl_names,ctrl_names)
                 elif joint_names is not None: # 当显式给定 'joint_names' 时
                     ctrl_idxs = self.get_idxs_step(joint_names=joint_names)
-                # 施加控制
+                # 施加控制：把 ctrl 写进 data.ctrl（不指定下标则覆盖全部执行器）
                 if ctrl_idxs is None:
                     self.data.ctrl[:] = ctrl
                 else:
                     self.data.ctrl[ctrl_idxs] = ctrl
-            mujoco.mj_step(self.model,self.data,nstep=nstep)
+            mujoco.mj_step(self.model,self.data,nstep=nstep)  # 推进物理（核心）
 
         # 更新墙钟时间（以 'step_flag' 为条件）
         self.increase_wall_time(step_flag=step_flag)
@@ -1472,13 +1613,17 @@ class MuJoCoParserClass(object):
         返回:
             None
         """
+        # 正运动学（forward kinematics）：已知每个关节的角度/位置（qpos），
+        # 计算出每个刚体/末端在世界坐标里的位置和朝向。
+        # mj_forward 与 mj_step 的区别：mj_forward 只“按当前 qpos 算一遍各物体位置”，
+        # 不让时间前进、不施加力；常用于“我直接把关节摆到某个角度，看看末端在哪”。
         if q is not None:
             if joint_names is not None: # 如果 'joint_names' 非 None，则会覆盖 'joint_idxs'
                 joint_idxs = self.get_idxs_fwd(joint_names=joint_names)
             if joint_idxs is not None:
-                self.data.qpos[joint_idxs] = q
-            else: self.data.qpos = q
-        mujoco.mj_forward(self.model,self.data)
+                self.data.qpos[joint_idxs] = q   # 只设置指定关节的角度
+            else: self.data.qpos = q             # 否则一次性设置全部关节
+        mujoco.mj_forward(self.model,self.data)  # 根据 qpos 算出所有物体的位姿
         if increase_tick:
             self.increase_tick()
 
@@ -1613,6 +1758,9 @@ class MuJoCoParserClass(object):
         qfrc_inverse = self.data.qfrc_inverse # [n_qacc]
         return qfrc_inverse.copy()
     
+    # 说明：下面 set_*_base_body 系列是给“带自由关节(free joint)的基座刚体”用的，
+    # 它通过修改 data.qpos（动态状态）来移动整个机器人/物体；
+    # 而后面 set_*_body 系列是改 model.body 的“固定偏移”（静态定义），用途不同，别混用。
     def set_p_base_body(self,body_name='base',p=np.array([0,0,0]),forward=True):
         """
         设置基座刚体的位置。
@@ -1624,6 +1772,7 @@ class MuJoCoParserClass(object):
         返回:
             None
         """
+        # 找到该刚体的自由关节，再找到它在 qpos 里的起始下标（前 3 个是位置，接下来 4 个是四元数朝向）
         jntadr  = self.model.body(body_name).jntadr[0]
         qposadr = self.model.jnt_qposadr[jntadr]
         self.data.qpos[qposadr:qposadr+3] = p
@@ -1751,6 +1900,8 @@ class MuJoCoParserClass(object):
         self.model.body(body_name).quat = r2quat(R)
         if forward: self.forward(increase_tick=False)
         
+    # 说明：mocap（动作捕捉）刚体是一种特殊的“无质量目标点”。常见用法是：让机械臂末端
+    # 通过 weld 约束去“追踪”这个 mocap 点，于是我们移动 mocap，就能间接拖动机械臂末端。
     def set_p_mocap(self,mocap_name='',p=np.array([0,0,0])):
         """
         设置动作捕捉（mocap）刚体的位置。
@@ -1915,7 +2066,9 @@ class MuJoCoParserClass(object):
         mujoco.mjr_readPixels(rgb_img,depth_img,self.viewer.viewport,self.viewer.ctx)
         rgb_img,depth_img = np.flipud(rgb_img),np.flipud(depth_img) # 上下翻转
 
-        # 重新缩放深度图像
+        # 重新缩放深度图像：
+        # OpenGL 读出的深度是 0~1 的“非线性深度缓冲值”，并不是真实的米。
+        # 这里用近裁剪面 near、远裁剪面 far，把它换算回“距相机的真实距离（米）”。
         extent = self.model.stat.extent
         near   = self.model.vis.map.znear * extent
         far    = self.model.vis.map.zfar * extent
@@ -1945,12 +2098,16 @@ class MuJoCoParserClass(object):
         """
         从给定的深度图像生成点云数据。
 
+        点云（point cloud）：一堆三维点 (x,y,z) 的集合，描述物体表面的形状。
+        深度图的每个像素记录了“该方向上最近物体离相机多远”，结合相机内参就能把
+        每个像素反投影成一个 3D 点，从而得到点云。
+
         参数:
             depth_img (np.array): 深度图像。
-            fovy (float): y 方向的视场角。
+            fovy (float): y 方向的视场角（决定相机焦距/内参）。
 
         返回:
-            tuple: (pcd, xyz_img, xyz_img_world)，表示点云及中间坐标数组。
+            tuple: (pcd, xyz_img, xyz_img_world)，分别是世界坐标点云、相机坐标系下的坐标图、世界坐标系下的坐标图。
         """
         # 获取相机位姿
         T_viewer = self.get_T_viewer()
@@ -1963,12 +2120,13 @@ class MuJoCoParserClass(object):
                             (0,focal_scaling,img_height/2),
                             (0,0,1)))
 
-        # 从深度图像估计 3D 点
+        # 从深度图像估计 3D 点（此时坐标是“相机坐标系”下的）
         xyz_img = meters2xyz(depth_img,cam_matrix) # [H x W x 3]
         xyz_transpose = np.transpose(xyz_img,(2,0,1)).reshape(3,-1) # [3 x N]
+        # 补一行 1，变成齐次坐标 [x,y,z,1]，这样能用 4x4 矩阵 T 一次性做旋转+平移
         xyzone_transpose = np.vstack((xyz_transpose,np.ones((1,xyz_transpose.shape[1])))) # [4 x N]
 
-        # 转换到世界坐标系
+        # 转换到世界坐标系：左乘相机的位姿矩阵 T_viewer，把“相机系坐标”变成“世界系坐标”
         xyzone_world_transpose = T_viewer @ xyzone_transpose
         xyz_world_transpose = xyzone_world_transpose[:3,:] # [3 x N]
         xyz_world = np.transpose(xyz_world_transpose,(1,0)) # [N x 3]
@@ -1987,6 +2145,8 @@ class MuJoCoParserClass(object):
         ):
         """
         根据给定的自身位置和目标位置捕获一张第一人称（egocentric）RGB 图像。
+        “第一人称”常用来模拟装在机械臂腕部的相机：给相机所在点 p_ego 和它要看向的点 p_trgt，
+        临时把观察相机搬过去拍一张，拍完再恢复原来的视角（restore_view=True 时）。
 
         参数:
             p_ego (np.array): 自身相机的位置。
@@ -2149,7 +2309,9 @@ class MuJoCoParserClass(object):
 
     def get_fixed_cam_rgb(self,cam_name):
         """
-            获取固定相机的 RGB 图像
+            获取固定相机的 RGB 图像。
+            “固定相机”指在 XML 里事先定义好、固定在场景中某处的相机（区别于可自由拖动的观察视角）。
+            按名字找到该相机，用它的视角渲染一帧，读出像素返回 RGB 图。
         """
         # 解析相机信息
         cam_idx  = self.cam_names.index(cam_name)
@@ -2279,6 +2441,13 @@ class MuJoCoParserClass(object):
         geom_idxs = [idx for idx,val in enumerate(self.model.geom_bodyid) if val==body_idx] 
         return geom_idxs
 
+    # ----------------------------------------------------------------------
+    # 下面一大批 get_* 方法是“位姿查询”接口，初学者最常用。约定：
+    #   p (position)：三维位置向量 [x, y, z]，单位米；
+    #   R (rotation)：3x3 旋转矩阵，表示朝向；
+    #   T (transform)：4x4 齐次变换矩阵，左上 3x3 是 R、右上 3x1 是 p，一次描述位置+朝向。
+    # 这些值都来自 data（动态状态），所以反映的是“当前这一刻”物体在世界坐标里的位姿。
+    # ----------------------------------------------------------------------
     def get_p_body(self,body_name):
         """
         获取指定刚体的位置。
@@ -2287,7 +2456,7 @@ class MuJoCoParserClass(object):
             body_name (str): 刚体的名称。
 
         返回:
-            np.array: 刚体的位置。
+            np.array: 刚体在世界坐标系下的位置 [x,y,z]。
         """
         return self.data.body(body_name).xpos.copy()
 
@@ -2644,6 +2813,10 @@ class MuJoCoParserClass(object):
         ):
         """
         在给定位姿处绘制坐标轴（以及可选的球体和标签）。
+        这是最常用的可视化工具：在 3D 场景里画出一个“坐标系小三脚架”——
+        三条互相垂直的箭头分别代表 x/y/z 轴（习惯上红=x、绿=y、蓝=z），
+        箭头的原点在 p、朝向由 R 决定。用它能直观看出某个物体/末端的位置和朝向。
+        注意：所有 plot_* 方法画的都是“仅供观看的装饰”，不参与物理，且每帧需重新调用。
 
         参数:
             p (np.array): 位置。
@@ -2666,12 +2839,14 @@ class MuJoCoParserClass(object):
             p = t2p(T)
             R = t2r(T)
             
+        # 画三条坐标轴：每条轴其实是用一根细长的“圆柱体”来表示的。
+        # 下面分别把一个圆柱旋转到 x/y/z 方向，并平移到合适位置，再设成红/绿/蓝色。
         if plot_axis:
             if axis_alpha is None: axis_alpha = 0.9
             if axis_rgba is None:
-                rgba_x = [1.0,0.0,0.0,axis_alpha]
-                rgba_y = [0.0,1.0,0.0,axis_alpha]
-                rgba_z = [0.0,0.0,1.0,axis_alpha]
+                rgba_x = [1.0,0.0,0.0,axis_alpha]  # x 轴红色
+                rgba_y = [0.0,1.0,0.0,axis_alpha]  # y 轴绿色
+                rgba_z = [0.0,0.0,1.0,axis_alpha]  # z 轴蓝色
             else:
                 rgba_x = axis_rgba
                 rgba_y = axis_rgba
@@ -3446,6 +3621,9 @@ class MuJoCoParserClass(object):
     def get_contact_info(self,must_include_prefix=None,must_exclude_prefix=None):
         """
         获取详细的接触信息，包括位置、力以及所涉及的几何体和刚体。
+        “接触（contact）”指两个几何体碰到一起的事件，比如夹爪碰到方块、物体放到桌面上。
+        MuJoCo 每一步会算出当前所有接触点，存在 data.contact 里；本函数把它们整理成
+        易用的列表：每个接触的位置、接触力、以及参与碰撞的两个几何体/刚体的名字。
 
         参数:
             must_include_prefix (str): 仅包含其中某个几何体名称以该前缀开头的接触。
@@ -3760,9 +3938,18 @@ class MuJoCoParserClass(object):
                         rgba = rgba,
                     )
             
+    # ----------------------------------------------------------------------
+    # 重要：同一个关节在不同场合有不同的“下标体系”，初学者很容易混淆，这里说明：
+    #   - idxs_fwd（qpos 下标）：用于读写位置 data.qpos，配合 forward()。
+    #   - idxs_jac（qvel/dof 下标）：用于雅可比矩阵的列、速度 data.qvel。
+    #   - idxs_step（执行器/控制下标）：用于发控制信号 data.ctrl，配合 step()。
+    # 为什么不一样？因为自由关节朝向用四元数占 qpos 4 个位、却只占 qvel/dof 3 个位，
+    # 所以位置维度(nq)和速度维度(nv)不一致；而控制下标又对应的是“执行器”而非关节本身。
+    # 下面三个 get_idxs_* 就是按关节名分别取出这三类下标。
+    # ----------------------------------------------------------------------
     def get_idxs_fwd(self,joint_names):
         """
-        根据关节名称获取用于前向运动学的关节索引。
+        根据关节名称获取用于前向运动学的关节索引（qpos 中的下标）。
 
         参数:
             joint_names (list): 关节名称列表。
@@ -3890,6 +4077,9 @@ class MuJoCoParserClass(object):
         ):
         """
         根据原始关节位置和耦合定义计算耦合后的关节位置。
+        “耦合（couple）”指有些关节并非独立，而是会按固定比例联动（常见于多指灵巧手：
+        一根手指里几个指节由一根肌腱带动，按权重一起弯曲）。本函数把这些联动组里的关节
+        按权重重新分配，得到一组“符合联动关系”的关节角度。
 
         参数:
             q_raw (np.array): 原始关节位置向量。
@@ -4014,12 +4204,17 @@ class MuJoCoParserClass(object):
     
     def get_xyz_left_double_click(self,verbose=False,fovy=45):
         """
-            获取双击位置的 xyz 坐标
+            获取鼠标左键双击处对应的 3D 世界坐标 (x,y,z)。
+            原理：鼠标点的是屏幕上的 2D 像素，但我们想知道它打到 3D 场景里的哪个点。
+            做法是用当前视角渲染一张带深度的图，得到“每个像素对应的世界坐标”，
+            再按鼠标像素位置取出那个点，就把 2D 点击“反投影”成了 3D 坐标。
+            常用于交互式拾取目标位置（比如双击桌面某处，让机械臂去那里）。
             :return self.xyz_left_double_click,flag_click:
         """
         flag_click = False
         if self.viewer._left_double_click_pressed: # 左键双击
-            viewer_mouse_xy = self.get_viewer_mouse_xy()
+            viewer_mouse_xy = self.get_viewer_mouse_xy()  # 鼠标当前像素坐标
+            # 渲染带深度的画面，xyz_img_world[行,列] 即该像素对应的世界坐标
             _,_,_,_,xyz_img_world = self.get_egocentric_rgbd_pcd(fovy=fovy)
             self.xyz_left_double_click = xyz_img_world[int(viewer_mouse_xy[1]),int(viewer_mouse_xy[0])]
             self.viewer._left_double_click_pressed = False
@@ -4112,16 +4307,26 @@ class MuJoCoParserClass(object):
             print ("[%s] 已选中"%(body_name_closest))
         return body_name_closest,p_body_closest
     
-    # 逆运动学
+    # ----------------------------------------------------------------------
+    # 逆运动学（Inverse Kinematics, IK）相关。先解释几个概念：
+    #   - 正运动学：已知关节角度 -> 求末端在哪（前面 forward 干的事）。
+    #   - 逆运动学：反过来，已知“想让末端到达的目标位姿”-> 求各关节该转到多少度。
+    #     这通常没有简单公式，常用“迭代逼近”的办法一点点逼近目标。
+    #   - 雅可比矩阵 J：描述“关节微小变化”如何引起“末端微小移动/转动”的对应关系，
+    #     即 (末端速度) = J × (关节速度)。它是从关节空间到笛卡尔空间的“放大镜/换算表”。
+    # 迭代 IK 的套路：算当前末端与目标的误差 err，再用 J 把 err 换算成应该调整的关节增量 dq，
+    # 反复执行直到误差足够小。下面几个方法就是这套流程的零件。
+    # ----------------------------------------------------------------------
     def get_J_body(self,body_name):
         """
-        计算指定刚体的雅可比矩阵（位置和旋转）。
+        计算指定刚体的雅可比矩阵（位置部分 J_p 和旋转部分 J_R）。
+        J 的列数等于自由度数；J_p 把关节速度映射成末端的线速度，J_R 映射成角速度。
 
         参数:
             body_name (str): 刚体的名称。
 
         返回:
-            tuple: (J_p, J_R, J_full)，其中 J_full 是堆叠后的雅可比矩阵。
+            tuple: (J_p, J_R, J_full)，其中 J_full 是位置和旋转部分上下堆叠后的 6×nv 雅可比矩阵。
         """
         J_p = np.zeros((3,self.n_dof)) # nv: 自由度数
         J_R = np.zeros((3,self.n_dof))
@@ -4155,7 +4360,10 @@ class MuJoCoParserClass(object):
             IK_R      = True,
         ):
         """
-        计算逆运动学所需的雅可比矩阵和误差向量。
+        计算逆运动学所需的“原料”：雅可比矩阵 J 和误差向量 err。
+        这是 IK 一次迭代的第一步：拿当前末端位姿和目标位姿做对比，算出还差多少（err），
+        同时取出对应的雅可比 J。之后把它们交给 damped_ls 求出关节该怎么调整。
+        IK_P / IK_R 控制是否考虑“位置误差 / 朝向误差”（有时只关心末端到没到点、不关心朝向）。
 
         参数:
             body_name (str): 刚体的名称（若提供）。
@@ -4169,6 +4377,7 @@ class MuJoCoParserClass(object):
             tuple: (J, err)，其中 J 是雅可比矩阵，err 是误差向量。
         """
 
+        # 没给目标位置/朝向，就关掉对应的误差项
         if p_trgt is None: IK_P = False
         if R_trgt is None: IK_R = False
 
@@ -4180,10 +4389,12 @@ class MuJoCoParserClass(object):
             p_curr,R_curr = self.get_pR_geom(geom_name=geom_name)
         if (body_name is not None) and (geom_name is not None):
             print ("[get_ik_ingredients] body_name:[%s] geom_name:[%s] 不能同时非 None!"%(body_name,geom_name))
+        # 根据要不要位置/朝向，拼出对应的 J 和 err：
+        # 位置误差就是目标位置减当前位置；朝向误差则换算成一个“需要绕哪个轴转多少”的向量 w_err。
         if (IK_P and IK_R):
             p_err = (p_trgt-p_curr)
-            R_err = np.linalg.solve(R_curr,R_trgt)
-            w_err = R_curr @ r2w(R_err)
+            R_err = np.linalg.solve(R_curr,R_trgt)   # 当前朝向到目标朝向的相对旋转
+            w_err = R_curr @ r2w(R_err)              # 把相对旋转转成世界系下的旋转误差向量
             J     = J_full
             err   = np.concatenate((p_err,w_err))
         elif (IK_P and not IK_R):
@@ -4202,20 +4413,24 @@ class MuJoCoParserClass(object):
     
     def damped_ls(self,J,err,eps=1e-6,stepsize=1.0,th=5*np.pi/180.0):
         """
-        使用阻尼最小二乘法求解逆运动学。
+        使用阻尼最小二乘法（Damped Least Squares）由误差 err 求出关节增量 dq。
+        直观理解：我们想找一组关节调整量 dq，使末端朝目标移动（即 J·dq ≈ err）。
+        直接求逆在某些姿态（“奇异位形”）会数值爆炸，于是加一个小阻尼项 eps 让解更稳定、
+        代价是稍微保守一点。最后再用 trim_scale 限制单步幅度，避免一步迈太大跳过头。
 
         参数:
             J (np.array): 雅可比矩阵。
-            err (np.array): 误差向量。
-            eps (float): 阻尼因子。
+            err (np.array): 误差向量（当前末端与目标的差距）。
+            eps (float): 阻尼因子（越大越稳但越慢）。
             stepsize (float): 步长乘子。
-            th (float): 缩放结果的阈值。
+            th (float): 单步关节增量的上限阈值（弧度）。
 
         返回:
             np.array: 计算得到的关节增量 (dq)。
         """
+        # 解带阻尼的法方程：dq = (JᵀJ + eps·I)⁻¹ Jᵀ err
         dq = stepsize*np.linalg.solve(a=(J.T@J)+eps*np.eye(J.shape[1]),b=J.T@err)
-        dq = trim_scale(x=dq,th=th)
+        dq = trim_scale(x=dq,th=th)   # 限幅，防止单步动作过大
         return dq
     
     def check_key_pressed(self,char=None):
@@ -4257,15 +4472,19 @@ class MuJoCoParserClass(object):
 
     def compensate_gravity(self,root_body_names):
         """
-            重力补偿
+            重力补偿：给机器人额外施加一组力，正好抵消重力，让它“失重”般悬停，
+            不会因为自重而往下塌。常用于示教/拖动场景，让人能轻松拖动机械臂摆姿势。
+            root_body_names：要补偿的若干子树根刚体（会对其下整条运动链补偿）。
         """
         qfrc_applied = self.data.qfrc_applied
         qfrc_applied[:] = 0.0  # 不要累加此前调用的结果。
         jac = np.empty((3,self.model.nv))
         for root_body_name in root_body_names:
             subtree_id = self.model.body(root_body_name).id
-            total_mass = self.model.body_subtreemass[subtree_id]
+            total_mass = self.model.body_subtreemass[subtree_id]  # 这条子树的总质量
+            # 子树质心相对各关节的雅可比：把“支撑住质心所需的力”换算成各关节上的力矩
             mujoco.mj_jacSubtreeCom(self.model,self.data,jac,subtree_id)
+            # 施加 -重力×质量 对应的关节力，恰好抵消重力
             qfrc_applied[:] -= self.model.opt.gravity * total_mass @ jac
             
     def set_rangefinder_rgba(self,rgba=(1,1,0,0.1)):
@@ -4338,7 +4557,9 @@ class MuJoCoParserClass(object):
 
     def is_key_pressed_once(self,key=None,key_list=None):
         """
-        检查某个特定的键是否被按下了一次。
+        检查某个键这一帧是否“刚被按下”（按一次只触发一次）。
+        与 is_key_pressed_repeat 的区别：本方法判断后会把该键从集合里移除，
+        所以按住不放也只会返回一次 True，适合“按一下切换一个状态”的场景。
 
         参数:
             key (str): 要检查的键。
@@ -4363,7 +4584,8 @@ class MuJoCoParserClass(object):
         
     def is_key_pressed_repeat(self,key=None,key_list=None):
         """
-        检查某个（些）特定的键是否被持续按下。
+        检查某个（些）键当前是否“正被按住”（按住期间会持续返回 True）。
+        适合“按住持续移动”的场景，比如按住方向键让机械臂一直缓慢移动。
 
         参数:
             key (str, 可选): 要检查的单个键。

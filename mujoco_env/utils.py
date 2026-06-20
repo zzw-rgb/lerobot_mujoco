@@ -1,3 +1,38 @@
+"""
+================================================================================
+通用工具集模块 (utils.py)
+================================================================================
+本文件是 MuJoCo 机械臂仿真教程项目里的"百宝箱",收集了写仿真/采数据时经常用到
+的零碎小工具函数。零基础读者可以把它当成一个"工具抽屉",按下面几大类去找:
+
+1. 随机采样与场景布置
+   - sample_xyzs / sample_xys:随机撒一堆点,且保证点之间不会挨得太近(互不重叠)。
+   - ObjectSpawner:在仿真场景里把托盘和物体随机摆到桌上(互不碰撞、随机朝向)。
+
+2. 索引检索(在列表/数组里找东西的位置)
+   - get_idxs / get_idxs_contain / get_idxs_closest_ndarray / get_consecutive_subarrays
+
+3. 轨迹与运动学(让机械臂动得平滑)
+   - finite_difference_matrix / get_A_vel_acc_jerk:用矩阵算速度、加速度、加加速度。
+   - get_interp_const_vel_traj_nd:把几个路点插值成一条"匀速"轨迹。
+   - check_vel_acc_jerk_nd:检查一条轨迹动得快不快、猛不猛。
+
+4. 几何变换(三维空间里的方向、旋转)
+   - compute_view_params:由相机/目标位置算出看相机参数(方位角、仰角等)。
+   - np_uv / unit_vector:把向量变成长度为 1 的单位向量。
+   - rotation_matrix:绕某根轴旋转的旋转矩阵。
+
+5. 图像与可视化
+   - get_colors / load_image / save_png / imshows / depth_to_gray_img / add_title_to_img
+
+6. XML 与其他杂项
+   - get_xml_string_from_path / prettify:读取/美化 MuJoCo 的 XML 模型文件。
+   - TicTocClass:秒表计时器。get_monitor_size:获取屏幕尺寸。sleep:暂停一会儿。
+
+注意:很多函数返回的数组都标注了"形状",例如 [L x D] 表示一个二维数组,有 L 行、
+D 列;常见含义是 L 个时间步、每步 D 个维度(比如机械臂的 D 个关节角度)。
+================================================================================
+"""
 import os
 import pyautogui
 import sys
@@ -20,7 +55,17 @@ import cv2
 from PIL import ImageDraw, ImageFont
 def trim_scale(x,th):
     """
-        裁剪缩放
+        裁剪缩放(等比例限幅)
+
+        大白话:如果数组 x 里绝对值最大的那个数超过了阈值 th,就把整个数组按同一比例
+        缩小,使得最大绝对值刚好等于 th;否则原样返回。这样既"压住了"过大的值,
+        又保持了各元素之间的相对比例(方向不变),常用于限制速度/力等不要超标。
+
+        参数:
+            x  : 任意 numpy 数组。
+            th : 阈值(threshold),允许的最大绝对值。
+        返回:
+            缩放后的数组(不会修改原数组)。
     """
     x         = np.copy(x)
     x_abs_max = np.abs(x).max()
@@ -34,6 +79,14 @@ def compute_view_params(
         up_vector = np.array([0,0,1]),
     ):
     """根据三维空间中的相机位姿,计算观察器的方位角(azimuth)、距离(distance)、仰角(elevation)和注视点(lookat)。
+
+    大白话:你想把虚拟相机放在某个位置去拍某个目标。MuJoCo 的查看器不是直接吃"相机
+    坐标",而是用"方位角 + 仰角 + 距离 + 注视点"这套球面参数来描述视角。本函数就是把
+    "相机在哪、看哪"换算成这套查看器能接受的参数。
+      - 方位角 azimuth:在水平面内绕一圈的角度(左右转头),单位度。
+      - 仰角 elevation:抬头/低头的角度,单位度。
+      - 距离 distance:相机到目标的直线距离。
+      - 注视点 lookat:相机盯着看的那个点(就是 target_pos)。
 
     Args:
         camera_pos (np.ndarray): 相机位置的三维数组。
@@ -56,7 +109,8 @@ def compute_view_params(
     # 计算注视点
     lookat = target_pos
 
-    # 计算相机朝向矩阵
+    # 计算相机朝向矩阵:用"从相机指向目标的方向"作为 z 轴,再借助上方向向量叉乘
+    # 出互相垂直的 x、y 轴,凑成一个三维坐标系(此处算出但未被返回,仅作完整性保留)。
     zaxis = cam_to_target / distance
     xaxis = np.cross(up_vector, zaxis)
     yaxis = np.cross(zaxis, xaxis)
@@ -68,6 +122,16 @@ def compute_view_params(
 def get_idxs(list_query,list_domain):
     """
         获取两个列表或 ndarray 之间相互对应的索引
+
+        大白话:对于 list_domain 里的每个元素,如果它也出现在 list_query 里,就找出它
+        在 list_query 中的位置(下标)。常用于"我有一个总的名字清单 list_query,现在
+        想知道其中一部分名字 list_domain 各自排在第几号"。
+
+        参数:
+            list_query  : 被查找的总清单(在它里面找位置)。
+            list_domain : 想要定位的若干元素。
+        返回:
+            idxs : 一个整数列表,是这些元素在 list_query 中的下标。
     """
     if isinstance(list_query,list) and isinstance(list_domain,list):
         idxs = [list_query.index(item) for item in list_domain if item in list_query]
@@ -77,14 +141,35 @@ def get_idxs(list_query,list_domain):
 
 def get_idxs_contain(list_query,list_substring):
     """
-        获取两个列表之间相互对应的索引
+        按"子串包含"关系查找索引
+
+        大白话:在字符串列表 list_query 里,找出那些"包含 list_substring 中任意一个
+        片段"的元素的下标。和 get_idxs 不同,这里不要求完全相等,只要"含有"即可。
+        例如清单里有 'body_obj_can_1',而 list_substring=['can'],它就会被选中。
+
+        参数:
+            list_query     : 字符串列表(在里面逐个检查)。
+            list_substring : 若干关键词片段,只要命中其一即算匹配。
+        返回:
+            idxs : 命中元素在 list_query 中的下标列表。
     """
     idxs = [i for i, s in enumerate(list_query) if any(sub in s for sub in list_substring)]
     return idxs
 
 def get_colors(n_color=10,cmap_name='gist_rainbow',alpha=1.0):
     """
-        获取多种不同的颜色
+        获取多种互相区分明显的颜色
+
+        大白话:一次性生成 n_color 种颜色,常用于画图时给多条曲线/多个物体上不同的色。
+        做法是从 matplotlib 的"色谱(colormap)"上等间隔取色——色谱就像一条彩虹条,
+        从一端均匀地采若干个点,得到一组渐变但彼此可分的颜色。
+
+        参数:
+            n_color   : 想要几种颜色。
+            cmap_name : 色谱名字(默认 'gist_rainbow' 即彩虹色)。
+            alpha     : 透明度(此参数当前未实际使用)。
+        返回:
+            colors : 长度为 n_color 的列表,每个元素是 (R,G,B,A) 四元组。
     """
     colors = [plt.get_cmap(cmap_name)(idx) for idx in np.linspace(0,1,n_color)]
     for idx in range(n_color):
@@ -94,7 +179,21 @@ def get_colors(n_color=10,cmap_name='gist_rainbow',alpha=1.0):
 
 def sample_xyzs(n_sample=1,x_range=[0,1],y_range=[0,1],z_range=[0,1],min_dist=0.1,xy_margin=0.0):
     """
-        在三维空间中采样若干点,并保证点之间满足最小距离要求
+        在三维空间中随机采样若干个互不重叠的点
+
+        大白话:在指定的长方体范围(x、y、z 各自的区间)里随机撒 n_sample 个点,并保证
+        任意两点之间的距离都不小于 min_dist。典型用途:采集数据时,把杯子、盘子等物体
+        随机摆到桌面上,且彼此不会叠在一起。
+
+        做法:逐个采点,每采一个就反复随机直到它离已采的所有点都足够远(拒绝采样)。
+
+        参数:
+            n_sample  : 要采几个点。
+            x_range / y_range / z_range : 各坐标轴的取值区间 [最小值, 最大值]。
+            min_dist  : 任意两点之间允许的最小距离(米)。
+            xy_margin : 在 x、y 方向上向内收缩的边距,避免点贴着边界(z 不受此影响)。
+        返回:
+            xyzs : 形状 [n_sample x 3] 的数组,每行是一个点的 (x, y, z) 坐标。
     """
     xyzs = np.zeros((n_sample,3))
     for p_idx in range(n_sample):
@@ -110,6 +209,18 @@ def sample_xyzs(n_sample=1,x_range=[0,1],y_range=[0,1],z_range=[0,1],min_dist=0.
     return xyzs
 
 class ObjectSpawner:
+    """
+        物体生成器:在 MuJoCo 仿真场景里随机布置托盘和若干物体
+
+        大白话:每次开始采集数据前,我们希望桌面上的托盘和物体(杯子、罐子、瓶子等)
+        都摆在随机但合理的位置,而且彼此不碰撞、朝向也随机。这个类就负责干这件事:
+        先随机放一个托盘,再把其余物体一个个放到不重叠的位置,并给每个物体一个随机的
+        水平旋转角。这样每条数据的初始场景都不一样,训练出的模型泛化性更好。
+
+        用法:
+            spawner = ObjectSpawner(env)   # env 是仿真环境
+            spawner.spawn_objects()        # 随机布置一次场景
+    """
     def __init__(self, env):
         """
         env: 一个环境实例,需提供以下方法:
@@ -120,6 +231,7 @@ class ObjectSpawner:
         self.env = env
 
     def spawn_objects(self):
+        # 随机布置整个场景:先放托盘,再放其余物体(每个物体不与他人/托盘重叠,且随机朝向)。
         # --- 生成托盘 ---
         # 使用提供的采样函数采样托盘位置。
         tray_xyz = sample_xyzs(
@@ -200,7 +312,14 @@ class ObjectSpawner:
 
 def sample_xys(n_sample=1,x_range=[0,1],y_range=[0,1],min_dist=0.1,xy_margin=0.0):
     """
-        在三维空间中采样若干点,并保证点之间满足最小距离要求
+        在二维平面上随机采样若干个互不重叠的点
+
+        和 sample_xyzs 几乎一样,只是少了 z 维度——只在水平面 (x, y) 上撒点,保证两两
+        之间距离不小于 min_dist。适合"高度固定、只关心平面位置"的摆放场景。
+
+        参数:含义同 sample_xyzs(去掉 z_range)。
+        返回:
+            xys : 形状 [n_sample x 2] 的数组,每行是一个点的 (x, y) 坐标。
     """
     xys = np.zeros((n_sample,2))
     for p_idx in range(n_sample):
@@ -216,7 +335,15 @@ def sample_xys(n_sample=1,x_range=[0,1],y_range=[0,1],min_dist=0.1,xy_margin=0.0
 
 def save_png(img,png_path,verbose=False):
     """
-        保存图像
+        把图像保存为 PNG 文件
+
+        大白话:给一张图(numpy 数组)和一个保存路径,就帮你存成 png。如果路径所在的
+        文件夹还不存在,会自动先把文件夹建好。verbose=True 时会打印提示信息。
+
+        参数:
+            img      : 图像数组(如 [H x W x 3] 的 RGB 图)。
+            png_path : 目标文件路径,例如 'out/img_0.png'。
+            verbose  : 是否打印"已生成/已保存"提示。
     """
     directory = os.path.dirname(png_path)
     if not os.path.exists(directory):
@@ -230,9 +357,21 @@ def save_png(img,png_path,verbose=False):
 
 def finite_difference_matrix(n, dt, order):
     """
-    n: 点的数量
-    dt: 时间间隔
+    构造"有限差分"矩阵,用来对一串等间隔采样的数值求导(求变化率)。
+
+    大白话:假设我们记录了某个量(比如某个关节角度)在等时间间隔下的 n 个数值,排成
+    一列。我们想知道它变化得有多快——
+      - 一阶导数 = 速度(位置每秒变多少);
+      - 二阶导数 = 加速度(速度每秒变多少);
+      - 三阶导数 = 加加速度 jerk(加速度变化得猛不猛,越大越"颠")。
+    连续函数靠求导,离散数据则靠"相邻点相减再除以时间间隔"来近似,这就是"有限差分"。
+    本函数把这种"相邻相减"的规则打包成一个 n×n 矩阵 A,之后只要算 A @ 数据列,
+    就能一次性得到每个时刻的导数,非常方便。
+
+    n: 点的数量(数据有多少个时间步)
+    dt: 时间间隔(相邻两个点相差多少秒)
     order: 阶数 (1=速度, 2=加速度, 3=加加速度/jerk)
+    返回: 形状 [n x n] 的差分矩阵(末尾几行用"后向差分"补齐,避免越界)。
     """
     # 阶数
     if order == 1:  # 速度
@@ -266,7 +405,17 @@ def finite_difference_matrix(n, dt, order):
 
 def get_A_vel_acc_jerk(n=100,dt=1e-2):
     """
-        获取用于计算速度、加速度和加加速度(jerk)的矩阵
+        一次性拿到速度、加速度、加加速度(jerk)三个差分矩阵
+
+        大白话:这是 finite_difference_matrix 的小封装,帮你把 1/2/3 阶差分矩阵都建好。
+        之后对一条轨迹数据列 q,分别算 A_vel @ q、A_acc @ q、A_jerk @ q 就能得到
+        速度、加速度、加加速度。
+
+        参数:
+            n  : 轨迹点数。
+            dt : 相邻两点的时间间隔(秒)。
+        返回:
+            A_vel, A_acc, A_jerk:三个 [n x n] 矩阵。
     """
     A_vel  = finite_difference_matrix(n,dt,order=1)
     A_acc  = finite_difference_matrix(n,dt,order=2)
@@ -274,6 +423,19 @@ def get_A_vel_acc_jerk(n=100,dt=1e-2):
     return A_vel,A_acc,A_jerk
 
 def get_idxs_closest_ndarray(ndarray_query,ndarray_domain):
+    """
+        在一个数组里,为另一个数组的每个值找"最接近的那个"的下标
+
+        大白话:对于 ndarray_domain 里的每个数 x,在 ndarray_query 中找到与 x 数值最接近
+        的元素,返回它的下标。典型用途:已知插值后的密集时间轴 ndarray_query,想知道
+        原始几个路点的时间 ndarray_domain 各自落在密集时间轴的第几个位置。
+
+        参数:
+            ndarray_query  : 被搜索的数组(在它里面找最近的)。
+            ndarray_domain : 若干目标值。
+        返回:
+            一个下标列表,长度与 ndarray_domain 相同。
+    """
     return [np.argmin(np.abs(ndarray_query-x)) for x in ndarray_domain]
 
 def get_interp_const_vel_traj_nd(
@@ -283,22 +445,48 @@ def get_interp_const_vel_traj_nd(
         ord = np.inf,
     ):
     """
-        获取经线性插值得到的匀速轨迹
-        输出为 (times_interp, anchors_interp, times_anchor, idxs_anchor)
+        把几个路点连成一条"匀速"的密集轨迹(线性插值)
+
+        大白话:你给出几个关键路点(anchors),比如机械臂依次要经过的几个姿态。本函数把
+        相邻路点之间用直线连起来,并按固定的速度 vel 重新"铺"出一串细密的中间点,使得
+        机械臂沿途以大致恒定的速度移动。距离远的两个路点之间会被铺上更多中间点(因为
+        匀速走完更长的路要花更多时间),这样动作就不会忽快忽慢。
+
+        关键思路:
+          1. 算出相邻路点之间的距离;
+          2. 距离 ÷ 速度 = 走这段要花的时间,累加得到每个路点的"到达时刻" times_anchor;
+          3. 在 0 到总时长之间按采样频率 HZ 均匀铺出密集时间轴 times_interp;
+          4. 对每个维度分别做一维线性插值,得到每个密集时刻的取值。
+
+        参数:
+            anchors : 形状 [L x D] 的路点数组,L 个路点、每个 D 维(如 D 个关节角)。
+            vel     : 期望的移动速度(决定铺多密、总共多长时间)。
+            HZ      : 采样频率(每秒铺多少个点)。
+            ord     : 计算路点间距离时用的范数(默认 np.inf 即各维差值的最大值)。
+        返回:
+            times_interp   : [L_interp] 密集时间轴。
+            anchors_interp : [L_interp x D] 插值后的密集轨迹。
+            times_anchor   : [L] 每个原始路点对应的时刻。
+            idxs_anchor    : 每个原始路点在密集轨迹中最接近的下标。
     """
     L = anchors.shape[0]
     D = anchors.shape[1]
+    # 第 1 步:逐段计算相邻路点之间的距离(第 0 个点没有"上一个",距离记为 0)。
     dists = np.zeros(L)
     for tick in range(L):
         if tick > 0:
             p_prev,p_curr = anchors[tick-1,:],anchors[tick,:]
             dists[tick] = np.linalg.norm(p_prev-p_curr,ord=ord)
+    # 第 2 步:距离 ÷ 速度 = 每段耗时,累加(cumsum)得到每个路点的到达时刻。
     times_anchor = np.cumsum(dists/vel) # [L]
+    # 第 3 步:按频率 HZ 在 0~总时长之间均匀铺出密集时间轴。
     L_interp     = int(times_anchor[-1]*HZ)
     times_interp = np.linspace(0,times_anchor[-1],L_interp) # [L_interp]
+    # 第 4 步:对每一维单独做一维线性插值,填出每个密集时刻的取值。
     anchors_interp  = np.zeros((L_interp,D)) # [L_interp x D]
     for d_idx in range(D): # 对每个维度
         anchors_interp[:,d_idx] = np.interp(times_interp,times_anchor,anchors[:,d_idx])
+    # 顺带记录:每个原始路点落在密集轨迹的哪个位置(便于事后对应)。
     idxs_anchor = get_idxs_closest_ndarray(times_interp,times_anchor)
     return times_interp,anchors_interp,times_anchor,idxs_anchor
 
@@ -310,7 +498,21 @@ def check_vel_acc_jerk_nd(
         factor  = 1.0,
     ):
     """
-        检查 n 维轨迹的速度、加速度和加加速度(jerk)
+        检查一条 n 维轨迹动得快不快、猛不猛(速度/加速度/加加速度)
+
+        大白话:给定时间轴 times 和轨迹 traj,本函数对每一维分别算出整条轨迹的最大速度、
+        最大加速度、最大加加速度,以及起点/终点速度,用来判断这条轨迹是否平滑、会不会
+        让机械臂动作太剧烈。verbose=True 时把这些数值打印出来方便人工检查。
+
+        参数:
+            times   : [L] 各时间步对应的时刻(要求等间隔)。
+            traj    : [L x D] 轨迹,L 个时间步、每步 D 维。
+            verbose : 是否打印检查结果。
+            factor  : 打印时给数值乘的缩放系数(仅影响显示,不改变返回值)。
+        返回:
+            vel_inits, vel_finals, max_vels, max_accs, max_jerks:
+            五个列表,每个长度为 D,分别是各维的起始速度、终止速度、最大速度、
+            最大加速度、最大加加速度。
     """
     L,D = traj.shape[0],traj.shape[1]
     A_vel,A_acc,A_jerk = get_A_vel_acc_jerk(n=len(times),dt=times[1]-times[0])
@@ -343,7 +545,14 @@ def check_vel_acc_jerk_nd(
         
 def np_uv(vec):
     """
-        获取单位向量
+        把向量变成单位向量(长度归一化为 1,只保留方向)
+
+        大白话:向量既有方向又有长度。很多时候我们只关心"指向哪",不关心"多长",
+        就把它除以自己的长度,得到长度为 1 的"单位向量"。本函数还做了保护:如果向量
+        几乎是零向量(长度过小),直接返回默认方向 [0,0,1],避免除以 0 出错。
+
+        参数:vec —— 任意向量。
+        返回:同方向、长度为 1 的向量(零向量时返回 [0,0,1])。
     """
     x = np.array(vec)
     len = np.linalg.norm(x)
@@ -354,20 +563,47 @@ def np_uv(vec):
     
 def uv_T_joi(T_joi,joi_fr,joi_to):
     """
-        获取两个 JOI 位姿之间的单位向量
+        求"从一个关节指向另一个关节"的方向(单位向量)
+
+        说明:T_joi 是一个字典,键是关节/部位名,值是该部位的 4x4 位姿矩阵(包含位置和
+        姿态)。JOI 是 "Joints/Joint Of Interest"(关注的关节/部位)的简称。t2p() 从位姿
+        矩阵里取出位置(平移)。本函数算"从 joi_fr 指向 joi_to 的单位方向向量"。
+
+        参数:
+            T_joi  : {部位名: 4x4 位姿矩阵} 的字典。
+            joi_fr : 起点部位名。
+            joi_to : 终点部位名。
+        返回:长度为 1 的方向向量。
     """
     return np_uv(t2p(T_joi[joi_to]) - t2p(T_joi[joi_fr]))
 
 def len_T_joi(T_joi,joi_fr,joi_to):
     """
-        获取两个 JOI 位姿之间的长度(距离)
+        求两个关节/部位之间的直线距离
+
+        含义同 uv_T_joi,但这里返回的是两点间的距离(长度),而不是方向。
+        常用于量某段连杆/肢段有多长。
+
+        参数:同 uv_T_joi。
+        返回:两部位位置之间的欧氏距离(标量)。
     """
     return np.linalg.norm(t2p(T_joi[joi_to]) - t2p(T_joi[joi_fr]))
 
 def get_consecutive_subarrays(array,min_element=1):
     """
-        从数组中获取连续的子数组
+        把一串整数下标按"是否连续"切成若干段
+
+        大白话:给一串(通常已排序的)整数,例如 [2,3,4, 7,8, 20],本函数会在"不连续"
+        的地方断开,切成 [2,3,4]、[7,8]、[20] 这样的连续小段。常用于:某个条件在一段
+        连续帧里成立(比如手一直握着杯子),想把这些连续区间一段段拎出来。
+        只保留长度不小于 min_element 的段。
+
+        参数:
+            array       : 整数数组(一般是已排序的下标)。
+            min_element : 子段至少要有几个元素才保留。
+        返回:连续子数组组成的列表。
     """
+    # np.diff 求相邻差,差不等于 1 的位置就是"断点",在那里切开。
     split_points = np.where(np.diff(array) != 1)[0] + 1
     subarrays = np.split(array,split_points)    
     return [subarray for subarray in subarrays if len(subarray) >= min_element]
@@ -380,7 +616,16 @@ def load_image(image_path):
 
 def imshows(img_list,title_list,figsize=(8,2),fontsize=8):
     """
-        在一行中绘制多张图像
+        把多张图像并排显示在一行里
+
+        大白话:传入一组图和对应的一组标题,本函数用 matplotlib 把它们横向排成一行
+        显示出来,方便一眼对比(比如同时看 RGB 图、深度图、分割图)。
+
+        参数:
+            img_list   : 图像列表。
+            title_list : 标题列表(与 img_list 一一对应)。
+            figsize    : 画布大小。
+            fontsize   : 标题字号。
     """
     n_img = len(img_list)
     plt.figure(figsize=(8,2))
@@ -395,7 +640,17 @@ def imshows(img_list,title_list,figsize=(8,2),fontsize=8):
     
 def depth_to_gray_img(depth,max_val=10.0):
     """
-        将单通道 float 类型的深度图转换为三通道 uint8 类型的灰度图
+        把深度图转换成可显示的灰度图
+
+        大白话:深度图里每个像素存的是"该点离相机多远"(单位米,是浮点数),没法直接当
+        普通图片看。本函数先把过远的距离截断到 max_val,再把距离线性映射到 0~255 的
+        灰度值,最后复制成三通道(R=G=B),变成一张能直接显示/保存的灰度图。
+        近处暗、远处亮(具体取决于数值分布)。
+
+        参数:
+            depth   : [H x W] 的浮点深度图。
+            max_val : 超过这个距离的都按 max_val 处理(截断,防止极远点拉坏对比度)。
+        返回:[H x W x 3] 的 uint8 灰度图。
     """
     depth_clip = np.clip(depth,a_min=0.0,a_max=max_val) # float 类型
     img = np.tile(255*depth_clip[:,:,np.newaxis]/depth_clip.max(),(1,1,3)).astype(np.uint8) # uint8 类型
@@ -409,6 +664,15 @@ def get_monitor_size():
     return w,h
     
 def get_xml_string_from_path(xml_path):
+    """
+        读取一个 XML 文件,返回它的字符串内容
+
+        大白话:MuJoCo 用 XML 文件(.xml/.mjcf)描述机器人和场景。本函数把指定路径的
+        XML 读进来、解析后再转回完整字符串,方便后续修改或拼接。
+
+        参数:xml_path —— XML 文件路径。
+        返回:该 XML 的字符串。
+    """
     # 解析 XML 文件
     tree = ET.parse(xml_path)
 
@@ -423,6 +687,13 @@ def get_xml_string_from_path(xml_path):
 def prettify(elem):
     """
         返回该 Element 经美化排版后的 XML 字符串。
+
+        大白话:程序生成的 XML 往往挤成一团、没有缩进,很难读。本函数给它加上整齐的
+        缩进换行(并去掉多余空行),变成人类好读的格式。常用于打印/保存拼好的 MuJoCo
+        模型时让文件更清晰。
+
+        参数:elem —— 一个 XML Element 节点。
+        返回:美化后的 XML 字符串。
     """
     rough_string = ET.tostring(elem, 'utf-8')
     reparsed = minidom.parseString(rough_string)
@@ -434,7 +705,13 @@ def prettify(elem):
 
 class TicTocClass(object):
     """
-        计时器(Tic toc)
+        计时器(Tic toc)—— 像秒表一样测量一段代码跑了多久
+
+        大白话:tic() 表示"开始计时",toc() 表示"停止并读数"。名字来自钟表"嘀-嗒"声。
+        典型用法:在耗时操作前调用 tic(),操作后调用 toc(verbose=True),它会自动选择
+        合适的单位(毫秒/秒/分钟)把用时打印出来。print_every 可控制每隔几次才打印一次,
+        避免循环里刷屏。
+
         tictoc = TicTocClass()
         tictoc.tic()
         ~~
@@ -488,7 +765,10 @@ class TicTocClass(object):
     
 def sleep(sec):
     """
-        休眠指定时间
+        暂停(休眠)指定的秒数
+
+        大白话:让程序停一会儿再继续,常用于控制仿真节奏或等画面刷新。
+        参数:sec —— 要暂停的秒数。
     """
     time.sleep(sec)
     
@@ -612,7 +892,20 @@ def rotation_matrix(angle, direction, point=None):
 
 def add_title_to_img(img,text='Title',margin_top=30,color=(0,0,0),font_size=20,resize=True,shape=(300,300)):
     """
-    为图像添加标题
+    为图像顶部添加一条文字标题
+
+    大白话:在原图上方留出一条白边,把标题文字居中写上去,返回一张"带标题"的新图。
+    常用于把多张相机图拼成图表时给每张图标注名字。可选先把图缩放到统一尺寸 shape。
+
+    参数:
+        img        : 原始图像(numpy 数组,RGB)。
+        text       : 标题文字。
+        margin_top : 顶部留白的高度(像素),标题就写在这条白边里。
+        color      : 文字颜色 (R,G,B)。
+        font_size  : 字号。
+        resize     : 是否先把图缩放到 shape。
+        shape      : 缩放后的目标尺寸 (宽, 高)。
+    返回:带标题的新图(numpy 数组)。
     """
     # 调整尺寸
     img_copied = img.copy()
