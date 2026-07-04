@@ -50,8 +50,6 @@ _os.chdir(_PROJECT_ROOT)
 # 为给定环境采集示教数据。
 # 本任务是抓取一个杯子并把它放到盘子上。当杯子位于盘子上、夹爪张开、且末端执行器位于杯子上方时，环境判定任务成功。
 #
-# <img src="./media/teleop.gif" width="480" height="360">
-#
 # 使用 WASD 控制 xy 平面，RF 控制 z 轴，QE 控制倾斜，方向键（ARROW）控制其余的旋转。
 #
 # 空格键（SPACEBAR）切换夹爪状态，Z 键重置环境并丢弃当前回合的数据。
@@ -79,12 +77,12 @@ from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
 # 摆放的位置都完全一样，方便调试和复现；设成 None 则每次位置随机。
 # 如果想随机化物体位置，把它设为 None
 # 如果固定随机种子，每次的物体位置都会相同
-SEED = 0
+SEED = None
 # SEED = None <- 取消注释这一行即可随机化物体位置
 
 # ---- 数据集相关的基本配置 ----
-REPO_NAME = 'omy_pnp'               # 数据集名字（repo_id），起个标识用，omy 是机械臂型号、pnp=pick and place 抓放
-NUM_DEMO = 1 # 要采集的示教数据数量（这里只采集 1 个回合；想多采就调大）
+REPO_NAME = 'franka_pnp'               # 数据集名字（repo_id），起个标识用，franka 是机械臂型号、pnp=pick and place 抓放
+NUM_DEMO = 50 # 要采集的示教数据数量
 ROOT = "./demo_data" # 保存示教数据的根目录（数据最终存到当前目录下的 demo_data 文件夹）
 
 # 任务的文字描述。注意：这个字符串会被一起存进数据集，训练时模型也会读到它，
@@ -110,7 +108,7 @@ PnPEnv = SimpleEnv(xml_path, seed = SEED, state_type = 'joint_angle')
 #   - observation.wrist_image：装在机械臂手腕上的相机拍到的画面（第一人称/近距离视角）。
 #   - observation.state：机器人当前的“状态”，这里是末端执行器的位姿，6 个数字：
 #       x,y,z（在空间中的位置）+ roll,pitch,yaw（绕三个轴的旋转角度，即朝向）。
-#   - action：“动作”，即这一帧机器人实际执行的指令，7 个数字 = 6 个关节角 + 1 个夹爪开合。
+#   - action：“动作”，即这一帧机器人实际执行的指令，8 个数字 = 7 个关节角 + 1 个夹爪开合。
 #       简单理解：observation 是“看到啥”，action 是“于是做了啥”，AI 就是学这个对应关系。
 #   - obj_init：物体（杯子）的初始位置，仅作记录，训练时不用。
 #
@@ -135,8 +133,8 @@ PnPEnv = SimpleEnv(xml_path, seed = SEED, state_type = 'joint_angle')
 #     },
 #     "action": {
 #         "dtype": "float32",
-#         "shape": (7,),
-#         "names": ["action"], # 6 joint angles and 1 gripper
+#         "shape": (8,),
+#         "names": ["action"], # 7 joint angles and 1 gripper
 #     },
 #     "obj_init": {
 #         "dtype": "float32",
@@ -185,7 +183,7 @@ if create_new:
     dataset = LeRobotDataset.create(
                 repo_id=REPO_NAME,        # 数据集标识名
                 root = ROOT,              # 存到哪个文件夹
-                robot_type="omy",         # 机器人型号标记
+                robot_type="franka",         # 机器人型号标记
                 fps=20, # 每秒 20 帧（每秒记录 20 张“快照”）
                 features={
                     "observation.image": {
@@ -205,8 +203,8 @@ if create_new:
                     },
                     "action": {
                         "dtype": "float32",
-                        "shape": (7,),
-                        "names": ["action"], # 6 个关节角和 1 个夹爪
+                        "shape": (8,),
+                        "names": ["action"], # 7 个关节角和 1 个夹爪
                     },
                     "obj_init": {
                         "dtype": "float32",
@@ -214,8 +212,10 @@ if create_new:
                         "names": ["obj_init"], # 仅为物体的初始位置，不用于训练。
                     },
                 },
-                image_writer_threads=10,    # 用 10 个线程异步写图片（图片多，多开几个线程存得快）
-                image_writer_processes=5,   # 配合上面，用 5 个进程并行写图片
+                # Windows 子进程会重新执行本脚本，递归创建 MuJoCo 场景并耗尽内存。
+                # 只用线程异步写图；LeRobot 默认的图片写入进程数也是 0。
+                image_writer_threads=10,
+                image_writer_processes=0,
         )
 else:
     # 用户选择保留旧数据，则直接把已有数据集加载进来（在它后面继续追加新回合）。
@@ -300,16 +300,17 @@ while PnPEnv.env.is_viewer_alive() and episode_id < NUM_DEMO:
     # 仿真内部跑得很快（一秒可能上千步），但我们只想每秒记录 20 帧（即每隔 1/20=0.05 秒记一次），
     # 所以用它来“限速”。HZ=20 就是 20 赫兹=每秒 20 次的意思。
     if PnPEnv.env.loop_every(HZ=20):
-        # 检查当前回合是否结束（任务是否成功完成）
-        # check_success 返回 True 表示：杯子已在盘子上、夹爪张开、且末端在杯子上方 —— 判定成功。
-        done = PnPEnv.check_success()
-        if done:
+        # 检查当前回合是否结束：由人按回车手动确认，不做自动成功判定
+        # （check_success 只在 deploy_act.py 的自动 rollout 里用，采集阶段完全由人来把关质量）。
+        if PnPEnv.is_finish_pressed():   # 按回车=手动确认本轮完成、存盘、进入下一轮
             # 成功了！把这一整个回合的数据正式存盘，然后重置环境，准备采下一回合。
             # save_episode：把刚才一帧帧攒下来的数据打包写成一个 episode 文件。
             dataset.save_episode()
             # reset：把仿真“重置”——机械臂回到初始姿势，杯子盘子重新摆放，相当于“重开一局”。
             PnPEnv.reset(seed = SEED)
-            episode_id += 1        # 已完成回合数 +1
+            episode_id += 1
+            print("✓ 第 %d/%d 轮已保存" % (episode_id, NUM_DEMO))
+            record_flag = False        # 已完成回合数 +1
         # 遥操作机器人：读取你此刻按下的键，换算成动作。
         # action 是“末端执行器位姿的增量(移动/旋转多少) + 夹爪状态”，reset 是“你是否按了 z 键想重置”。
         action, reset  = PnPEnv.teleop_robot()
@@ -357,7 +358,7 @@ while PnPEnv.env.is_viewer_alive() and episode_id < NUM_DEMO:
                 }, task = TASK_NAME                          # 任务文字描述
             )
         # 把当前画面渲染显示到 MuJoCo 窗口里（teleop=True 表示叠加显示遥操作相关的提示画面）。
-        PnPEnv.render(teleop=True)
+        PnPEnv.render(teleop=True, idx=episode_id, total=NUM_DEMO)
 
 # 循环结束（采够了或人关掉了窗口），关闭仿真窗口。
 PnPEnv.env.close_viewer()
@@ -366,4 +367,6 @@ PnPEnv.env.close_viewer()
 # 采集过程中临时图片会落在 images 文件夹里，存盘后这个中间文件夹就没用了，删掉它节省空间。
 # 清理 images 文件夹
 import shutil
-shutil.rmtree(dataset.root / 'images')
+images_dir = dataset.root / 'images'
+if images_dir.exists():
+    shutil.rmtree(images_dir)

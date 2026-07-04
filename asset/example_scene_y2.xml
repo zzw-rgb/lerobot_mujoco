@@ -1,36 +1,31 @@
-<mujoco model="Scanned Objects">
-    <!-- Memory? -->
-    <size memory="500M"/>
-    
-    <!-- Default options -->
-    <!-- <compiler angle="radian" assetdir="./tabletop/mesh" autolimits="true" /> -->
-    <option integrator="RK4" noslip_iterations="20" />
-    <default>
-        <joint armature="0.1" damping="0.1" />
-        <default class="visual_only">
-            <geom type="mesh" contype="0" conaffinity="0" group="2" />
-        </default>
-        <default class="no_visual_collision">
-            <!-- visual group of 'collision' should be 3 to not render -->
-            <geom type="capsule" solimp=".9 .99 .001" solref=".015 1" group="3" />
-        </default>
-        <default class="visual_collision">
-            <geom type="mesh" solimp=".9 .99 .001" solref=".015 1" group="2" />
-        </default>
+<!--
+  Franka Panda 桌面抓放场景（多物体 + 语言条件）。
+  组成：地面 + 桌子（自带 agentview / sideview / topview 三个相机）+ Franka Panda 机械臂
+        （panda.xml 内含末端 tcp_link 与腕部相机 egocentric）
+        + 红杯子 mug_5 + 蓝杯子 mug_6 + 盘子 plate_11。
+  供 mujoco_env/SimpleEnv2.py（多物体语言条件环境）加载使用。
+  物理积分器由 panda.xml 的 <option integrator="implicitfast"> 提供，本文件不再声明 <option>。
+-->
+<mujoco model="franka tabletop scene 2">
+  <size memory="500M"/>
+
+  <default>
+    <joint armature="0.1" damping="0.1"/>
+    <default class="visual_only">
+      <geom type="mesh" contype="0" conaffinity="0" group="2"/>
     </default>
-    
-    <!-- Sky and floor -->
-    <include file="./tabletop/object/floor_isaac_style.xml" />
+    <default class="no_visual_collision">
+      <geom type="capsule" solimp=".9 .99 .001" solref=".015 1" group="3"/>
+    </default>
+    <default class="visual_collision">
+      <geom type="mesh" solimp=".9 .99 .001" solref=".015 1" group="2"/>
+    </default>
+  </default>
 
-    <!-- Table -->
-    <include file="./tabletop/object/object_table.xml" />
-    
-    <!-- UR52 -->
-   
-
-    <include file="./robotis_omy/omy.xml" />
-    <include file="./objaverse/mug_5/model_new.xml"/>
-    <include file="./objaverse/plate_11/model_new.xml"/>
-    <include file="./objaverse/mug_6/model_new.xml"/>
-
+  <include file="./tabletop/object/floor_isaac_style.xml"/>
+  <include file="./tabletop/object/object_table.xml"/>
+  <include file="./franka_panda/panda.xml"/>
+  <include file="./objaverse/mug_5/model_new.xml"/>
+  <include file="./objaverse/plate_11/model_new.xml"/>
+  <include file="./objaverse/mug_6/model_new.xml"/>
 </mujoco>

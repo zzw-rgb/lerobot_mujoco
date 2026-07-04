@@ -597,15 +597,24 @@ class MuJoCoMinimalViewer(MinimalCallbacks):
             和 add_rgb_overlay 类似，但支持四个角分别独立放图。
             loc:['top right','top left','bottom right','bottom left']
         """
-        w_window,h_window = glfw.get_framebuffer_size(self.window)
-        h_overlay,w_overlay = h_window//4,w_window//4
-        rgb_overlay = np.zeros((h_overlay,w_overlay,3))
-        # 固定宽高比
+        # 窗口最小化、刚创建或正在调整尺寸时，GLFW 可能短暂返回 0x0。
+        # 这种情况下保留上一帧叠加图，不调用 cv2.resize，避免整个采集进程退出。
+        if rgb is None or not hasattr(rgb, 'shape') or rgb.ndim < 2:
+            return
         h_raw,w_raw = rgb.shape[:2]
+        if h_raw <= 0 or w_raw <= 0:
+            return
+
+        w_window,h_window = glfw.get_framebuffer_size(self.window)
+        if w_window <= 0 or h_window <= 0:
+            return
+
+        h_overlay = max(1, h_window//4)
+        w_overlay = max(1, w_window//4)
         # 计算保持宽高比的缩放比例
         scale = min(w_overlay/w_raw,h_overlay/h_raw)
-        w_new = int(w_raw*scale)
-        h_new = int(h_raw*scale)
+        w_new = max(1, min(w_overlay, int(round(w_raw*scale))))
+        h_new = max(1, min(h_overlay, int(round(h_raw*scale))))
         # 缩放
         rgb_resized = cv2.resize(rgb,(w_new,h_new),interpolation=cv2.INTER_NEAREST)
         # 创建一个目标尺寸的黑色画布
@@ -672,6 +681,10 @@ class MuJoCoMinimalViewer(MinimalCallbacks):
             # 渲染开始
             render_start = time.time()
             width, height = glfw.get_framebuffer_size(self.window)
+            # 窗口最小化时 framebuffer 会变成 0x0；继续处理会产生非法视口。
+            if width <= 0 or height <= 0:
+                glfw.poll_events()
+                return
             self.viewport.width, self.viewport.height = width, height
 
             with self._gui_lock:

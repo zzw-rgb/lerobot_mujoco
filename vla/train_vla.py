@@ -27,8 +27,8 @@
 
 运行方式（在配置文件里写好所有超参数，然后用 --config_path 指定它）：
 
-    python vla/train_vla.py --config_path config/pi0_omy.yaml
-    python vla/train_vla.py --config_path config/smolvla_omy.yaml
+    python vla/train_vla.py --config_path config/pi0_franka.yaml
+    python vla/train_vla.py --config_path config/smolvla_franka.yaml
 
 整体流程概览：
     1. 读取 yaml 配置 → 构造 cfg（由 @parser.wrap() 自动完成，见 train 函数说明）
@@ -187,7 +187,7 @@ def update_policy(
 #
 # 关于 @parser.wrap()：
 #   这是 LeRobot 提供的装饰器。它会拦截命令行参数（比如我们传的
-#   --config_path config/pi0_omy.yaml），把 yaml 配置文件解析、校验后，自动构造成一个
+#   --config_path config/pi0_franka.yaml），把 yaml 配置文件解析、校验后，自动构造成一个
 #   TrainPipelineConfig 对象，并以 cfg 这个参数注入进来。也就是说，我们在命令行
 #   写的 --config_path，最终就变成了函数里能直接用的 cfg.xxx（如 cfg.steps、
 #   cfg.batch_size、cfg.policy 等）。所以调用时只写 train()，cfg 由装饰器填好。
@@ -426,6 +426,6 @@ if __name__ == "__main__":
     init_logging()  # 初始化日志格式
     # 调用 train()，但实参 cfg 由 @parser.wrap() 从命令行 --config_path 自动解析注入，
     # 因此这里不需要、也不能手动传参。运行示例：
-    #   python vla/train_vla.py --config_path config/pi0_omy.yaml
-    #   python vla/train_vla.py --config_path config/smolvla_omy.yaml
+    #   python vla/train_vla.py --config_path config/pi0_franka.yaml
+    #   python vla/train_vla.py --config_path config/smolvla_franka.yaml
     train()

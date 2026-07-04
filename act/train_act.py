@@ -18,7 +18,7 @@
   一步一步走，容易抖、容易累积误差。ACT 改成“看一眼，一次性预测未来连续一小段
   动作”（比如未来 10 步），更平滑、更稳。这“一小段”的长度就是 chunk_size。
 
-训练完成后，检查点（即存到硬盘上的模型）保存到 ./ckpt/act_y，
+训练完成后，检查点（即存到硬盘上的模型）保存到 ./ckpt/act_franka，
 并在数据集上评估“预测动作”与“真值(ground-truth，即专家真实动作)”的平均误差。
 
 运行方式（需要 NVIDIA GPU，约 30~60 分钟）：
@@ -85,8 +85,8 @@ log_freq = 100
 #     （统计量=数据集里各项数值的均值、标准差等；下面会讲归一化为什么需要）
 
 # 先读取数据集的“元信息”（metadata，即关于数据的说明：有哪些字段、各自的形状、统计量等），
-# 但还没真正把图像数据全部载入内存。"omy_pnp" 是数据集名字，root 是它在硬盘上的位置。
-dataset_metadata = LeRobotDatasetMetadata("omy_pnp", root='./demo_data')
+# 但还没真正把图像数据全部载入内存。"franka_pnp" 是数据集名字，root 是它在硬盘上的位置。
+dataset_metadata = LeRobotDatasetMetadata("franka_pnp", root='./demo_data')
 # 把数据集里的字段翻译成“策略能理解的特征(feature)描述”，每个特征带有类型和形状信息。
 features = dataset_to_policy_features(dataset_metadata.features)
 # 输出特征 = 类型为 ACTION（动作）的那些字段，也就是网络要预测/输出的东西。
@@ -155,7 +155,7 @@ transform = transforms.Compose([
 # 接着我们用这些 delta_timestamps 配置来实例化数据集。
 # 这次是真正把数据集准备好用于训练：每取一条样本，会按 delta_timestamps 打包好一小段动作，
 # 并对图像套用上面定义的 transform 做增强。
-dataset = LeRobotDataset("omy_pnp", delta_timestamps=delta_timestamps, root='./demo_data', image_transforms=transform)
+dataset = LeRobotDataset("franka_pnp", delta_timestamps=delta_timestamps, root='./demo_data', image_transforms=transform)
 
 # 然后为离线训练创建优化器和数据加载器。
 # 优化器(optimizer) = 负责“怎么调整网络参数”的算法。Adam 是最常用的一种，
@@ -176,7 +176,7 @@ dataloader = torch.utils.data.DataLoader(
 # ======================================================================
 # ## 训练
 #
-# 训练得到的检查点将保存在 './ckpt/act_y' 文件夹中。
+# 训练得到的检查点将保存在 './ckpt/act_franka' 文件夹中。
 # ======================================================================
 
 # 运行训练循环。
@@ -209,9 +209,9 @@ while not done:
             break
 
 # 将策略保存到磁盘。
-# 保存下来的模型就叫“检查点(checkpoint)”，存到 ./ckpt/act_y 文件夹。
+# 保存下来的模型就叫“检查点(checkpoint)”，存到 ./ckpt/act_franka 文件夹。
 # 以后做推理/部署时，直接从这里把训练好的模型加载回来即可，不用重新训练。
-policy.save_pretrained('./ckpt/act_y')
+policy.save_pretrained('./ckpt/act_franka')
 
 # ======================================================================
 # ## 测试推理
@@ -278,8 +278,8 @@ print(f"动作平均误差: {torch.mean(torch.abs(actions - gt_actions)).item():
 两条线贴得越近，说明模型学得越好。
 '''
 import matplotlib.pyplot as plt
-# action_dim=7：动作有 7 个维度（这里通常是机械臂 6 个关节 + 1 个夹爪开合）。
-action_dim = 7
+# action_dim=8：动作有 8 个维度（机械臂 7 个关节 + 1 个夹爪开合）。
+action_dim = 8
 
 # 建 7 个上下排列的子图，每个子图画一维动作。
 fig, axs = plt.subplots(action_dim, 1, figsize=(10, 10))

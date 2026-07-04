@@ -25,10 +25,9 @@
     conda activate lerobot
     python act/visualize_data_act.py
 
-  - 运行后会弹出一个 MuJoCo 窗口，自动循环回放选中的那一回合（episode）数据，
-    关掉窗口即结束。
-  - 想改看第几回合，修改下面的 episode_index 变量即可。
-  - 确认数据没问题后，就可以用训练脚本 train_vla.py 拿这批数据去训练策略模型了。
+  - 运行后会弹出一个 MuJoCo 窗口，自动循环回放当前选中的那一回合（episode）数据。
+  - 窗口内按 M 切到下一个回合、N 切到上一个回合、Q 结束程序（也可以直接关窗口）。
+  - 确认数据没问题后，就可以用训练脚本 train_act.py 拿这批数据去训练 ACT 模型了。
 
 提示：本脚本原为教程笔记本（notebook），现整理成普通 Python 脚本，自上而下顺序执行即可。
 """
@@ -47,8 +46,6 @@ _os.chdir(_PROJECT_ROOT)
 # ======================================================================
 # # 可视化你的数据
 #
-# <img src="./media/data.gif" width="480" height="360">
-#
 # 在重建的仿真场景中可视化你的动作。
 #
 # 主仿真画面正在回放动作。
@@ -63,12 +60,13 @@ _os.chdir(_PROJECT_ROOT)
 # write_json / serialize_dict：把统计信息（均值、方差等）整理成可写入磁盘的格式并存成 json。
 from lerobot.common.datasets.lerobot_dataset import LeRobotDataset, LeRobotDatasetMetadata
 import numpy as np
+import glfw
 from lerobot.common.datasets.utils import write_json, serialize_dict
 
 # 打开我们之前采集好的数据集。
-#   - 第一个参数 'omy_pnp' 是数据集名字（omy 机械臂的 pick-and-place 抓放任务）。
+#   - 第一个参数 'franka_pnp' 是数据集名字（franka 机械臂的 pick-and-place 抓放任务）。
 #   - root 指定数据存放的文件夹。
-dataset = LeRobotDataset('omy_pnp', root='./demo_data') # 若你还没自己采集数据，可下载 Hugging Face 现成数据集后把 root 指向它（见 README 第五章步骤 2）。
+dataset = LeRobotDataset('franka_pnp', root='./demo_data') # 若你还没自己采集数据，可 git clone https://huggingface.co/datasets/a3124371940/franka_pnp 现成数据集。
 
 # ======================================================================
 # ## 加载数据集
@@ -108,22 +106,24 @@ class EpisodeSampler(torch.utils.data.Sampler):
         # 这个回合一共有多少帧（后面用来判断“是否已经放到最后一帧”）。
         return len(self.frame_ids)
 
-# 选择你想要可视化的 episode 索引（0 表示第一个回合，想看别的就改这个数字）
+# 选择你想要可视化的 episode 索引（0 表示第一个回合，运行时可按 N 键切到下一个）
 episode_index = 0
 
-# 用上面的采样器创建一个只针对该回合的采样器实例。
-episode_sampler = EpisodeSampler(dataset, episode_index)
-# 创建数据加载器（传送带）：
-#   - dataset：数据来源。
-#   - num_workers=1：用 1 个后台线程搬数据。
-#   - batch_size=1：每次只取 1 帧（回放是一帧一帧放的，所以一次取一帧最自然）。
-#   - sampler=episode_sampler：用我们的采样器，保证只取选中回合的那些帧。
-dataloader = torch.utils.data.DataLoader(
-    dataset,
-    num_workers=1,
-    batch_size=1,
-    sampler=episode_sampler,
-)
+def make_dataloader(episode_index):
+    '''
+    针对指定 episode 重新建一个采样器 + DataLoader。
+    切换回合（按 N 键）时调用，返回新的 sampler 和 dataloader 供主循环替换掉旧的。
+    '''
+    episode_sampler = EpisodeSampler(dataset, episode_index)
+    dataloader = torch.utils.data.DataLoader(
+        dataset,
+        num_workers=0, # Windows 下 >0 会 spawn 子进程重新执行本脚本，直接报错退出
+        batch_size=1,
+        sampler=episode_sampler,
+    )
+    return episode_sampler, dataloader
+
+episode_sampler, dataloader = make_dataloader(episode_index)
 
 # ======================================================================
 # ## 在仿真中可视化你的数据集
@@ -148,8 +148,10 @@ iter_dataloader = iter(dataloader)
 # 把仿真复位到初始状态（机械臂回到起始姿态等）。
 PnPEnv.reset()
 
+print(f"共 {dataset.num_episodes} 个回合。按 M 切下一个、N 切上一个回合，按 Q 结束程序。当前：回合 {episode_index}")
+
 # 主循环：只要 MuJoCo 的查看窗口还开着，就一直运行。
-# 关掉那个弹出的窗口，整个循环（以及程序）就结束。
+# 关掉那个弹出的窗口，或者按 Q 键，都会结束循环（以及程序）。
 while PnPEnv.env.is_viewer_alive():
     # step_env()：推进一小步物理仿真。物理引擎跑得很快（每秒很多步），
     #             这样画面才平滑、物体下落/碰撞才真实。
@@ -160,6 +162,26 @@ while PnPEnv.env.is_viewer_alive():
     #   所以这里限制为每秒只取并执行 20 个新动作，保持回放速度和采集时一致。
     #   下面这段 if 里的代码，每秒大约只进入 20 次。
     if PnPEnv.env.loop_every(HZ=20):
+        # Q：结束程序。
+        if PnPEnv.env.is_key_pressed_once(key=glfw.KEY_Q):
+            break
+        # M：切换到下一个回合；N：切换到上一个回合（两端循环衔接）。
+        if PnPEnv.env.is_key_pressed_once(key=glfw.KEY_M):
+            episode_index = (episode_index + 1) % dataset.num_episodes
+            print(f"切换到回合 {episode_index}")
+            episode_sampler, dataloader = make_dataloader(episode_index)
+            iter_dataloader = iter(dataloader)
+            PnPEnv.reset()
+            step = 0
+            continue
+        if PnPEnv.env.is_key_pressed_once(key=glfw.KEY_N):
+            episode_index = (episode_index - 1) % dataset.num_episodes
+            print(f"切换到回合 {episode_index}")
+            episode_sampler, dataloader = make_dataloader(episode_index)
+            iter_dataloader = iter(dataloader)
+            PnPEnv.reset()
+            step = 0
+            continue
         # 从“传送带”取出下一帧数据（包含这一帧的动作、当时的相机图像、物体初始位姿等）。
         data = next(iter_dataloader)
         if step == 0:
@@ -191,8 +213,8 @@ while PnPEnv.env.is_viewer_alive():
         PnPEnv.rgb_ego = np.transpose(PnPEnv.rgb_ego, (1,2,0))
         # side（侧视）相机这里没有对应数据，用一张全黑图占位即可。
         PnPEnv.rgb_side = np.zeros((480, 640, 3), dtype=np.uint8)
-        # 真正把这一帧画出来（含机械臂状态 + 角落里叠加的相机图像）。
-        PnPEnv.render()
+        # 真正把这一帧画出来（含机械臂状态 + 角落里叠加的相机图像），idx 传当前回合号用于画面显示。
+        PnPEnv.render(idx=episode_index)
         step += 1  # 帧计数 +1
 
         if step == len(episode_sampler):

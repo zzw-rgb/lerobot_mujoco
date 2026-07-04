@@ -1,0 +1,27 @@
+dataset:
+  repo_id: franka_pnp_language # 数据集仓库 ID
+  root: ./demo_data_language # 本地数据集根目录
+policy:
+  type : pi0                 # 策略类型：pi0
+  chunk_size: 5              # 动作块大小（一次预测的动作步数）
+  n_action_steps: 5          # 执行时一次推理走几步
+
+save_checkpoint: true
+output_dir: ./ckpt/pi0_franka # 检查点保存目录
+batch_size: 16
+job_name : pi0_franka
+resume: false              # 是否从已有检查点续训
+seed : 42
+num_workers: 8             # 数据加载进程数（遇 pickling 报错可设为 0）
+steps: 20_000              # 训练总步数
+eval_freq: -1 # 训练过程中不做评估
+log_freq: 50               # 每 50 步记录一次日志
+save_checkpoint: true
+save_freq: 10_000          # 每 10000 步保存一次检查点
+use_policy_training_preset: true # 使用策略自带的训练预设（优化器/调度器等）
+
+wandb:
+  enable: true             # 是否启用 Weights & Biases 日志
+  project: pi0_franka
+  entity: <你的wandb账户名>   # 改成你自己的 wandb 账户名
+  disable_artifact: true
