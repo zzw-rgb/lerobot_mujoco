@@ -23,11 +23,11 @@
 
 ================================ 运行方式（需要图形界面） ================================
     conda activate lerobot
-    python act/visualize_data_act.py
+    python il/visualize_data_il.py
 
   - 运行后会弹出一个 MuJoCo 窗口，自动循环回放当前选中的那一回合（episode）数据。
   - 窗口内按 M 切到下一个回合、N 切到上一个回合、Q 结束程序（也可以直接关窗口）。
-  - 确认数据没问题后，就可以用训练脚本 train_act.py 拿这批数据去训练 ACT 模型了。
+  - 确认数据没问题后，用 train_il.py 选择 ACT 或 Diffusion Policy 训练。
 
 提示：本脚本原为教程笔记本（notebook），现整理成普通 Python 脚本，自上而下顺序执行即可。
 """

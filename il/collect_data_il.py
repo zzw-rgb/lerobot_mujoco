@@ -7,7 +7,7 @@
     你坐在电脑前，用键盘像玩游戏一样操控一只虚拟（仿真里的）机械臂，
     把一个杯子抓起来、放到盘子上。整个过程中，程序会一帧一帧地把
     “机器人看到的画面 + 机器人当时的姿态 + 你按键产生的动作”记录下来，
-    存成一份“示教数据”。以后我们就拿这份数据去训练 AI 模型（ACT 模型），
+    存成一份“示教数据”。以后我们就拿这份数据去训练 ACT 或 Diffusion Policy，
     让机器人学会自己完成这个抓放动作，不再需要人来遥控。
 
 【几个零基础名词，先用大白话扫盲】
@@ -23,14 +23,14 @@
 
 【运行方式（需要图形界面，会弹出 MuJoCo 窗口并读取键盘）】
     conda activate lerobot
-    python act/collect_data_act.py
+    python il/collect_data_il.py
 
 【遥操作按键速查】
     W/S 前后  A/D 左右  R/F 上下  Q/E 倾斜  方向键 俯仰/偏转
     空格 切换夹爪开合   Z 重置并丢弃当前回合
 
 提示：本脚本原为教程笔记本（一个个单元格的 Jupyter notebook），现已转成普通 .py 脚本，
-自上而下顺序执行即可。采集好的数据之后用训练脚本 train_vla.py 来训练 ACT 模型。
+自上而下顺序执行即可。采集好的数据之后用 train_il.py 选择 ACT 或 Diffusion Policy 训练。
 """
 
 # === 运行环境自举（本脚本位于子文件夹，确保从任何目录都能正常运行）===
@@ -301,7 +301,7 @@ while PnPEnv.env.is_viewer_alive() and episode_id < NUM_DEMO:
     # 所以用它来“限速”。HZ=20 就是 20 赫兹=每秒 20 次的意思。
     if PnPEnv.env.loop_every(HZ=20):
         # 检查当前回合是否结束：由人按回车手动确认，不做自动成功判定
-        # （check_success 只在 deploy_act.py 的自动 rollout 里用，采集阶段完全由人来把关质量）。
+        # （check_success 只在 deploy_il.py 的自动 rollout 里用，采集阶段完全由人来把关质量）。
         if PnPEnv.is_finish_pressed():   # 按回车=手动确认本轮完成、存盘、进入下一轮
             # 成功了！把这一整个回合的数据正式存盘，然后重置环境，准备采下一回合。
             # save_episode：把刚才一帧帧攒下来的数据打包写成一个 episode 文件。

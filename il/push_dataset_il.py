@@ -8,7 +8,7 @@
 
 运行方式：
     conda activate lerobot
-    python act/push_dataset_act.py
+    python il/push_dataset_il.py
 """
 
 import os as _os, sys as _sys

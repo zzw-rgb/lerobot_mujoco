@@ -1,0 +1,36 @@
+dataset:
+  repo_id: franka_pnp
+  root: ./demo_data
+
+policy:
+  type: diffusion
+  device: cuda
+  n_obs_steps: 2
+  horizon: 16
+  n_action_steps: 8
+  crop_shape: [224, 224]
+  crop_is_random: true
+  vision_backbone: resnet18
+  pretrained_backbone_weights: ResNet18_Weights.IMAGENET1K_V1
+  use_group_norm: false          # Keep BatchNorm when loading ImageNet pretrained weights.
+  down_dims: [256, 512, 1024]
+  num_train_timesteps: 100
+  num_inference_steps: 10
+
+output_dir: ./ckpt/diffusion_franka
+job_name: diffusion_franka
+resume: false
+seed: 42
+num_workers: 0
+batch_size: 16
+steps: 20_000
+eval_freq: -1
+log_freq: 50
+save_checkpoint: true
+save_freq: 10_000
+use_policy_training_preset: true
+
+wandb:
+  enable: false
+  project: diffusion_franka
+  disable_artifact: true
