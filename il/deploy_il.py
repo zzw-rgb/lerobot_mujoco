@@ -5,6 +5,7 @@
 
     python il/deploy_il.py --config_path=config/il/act_franka.yaml
     python il/deploy_il.py --config_path=config/il/diffusion_franka.yaml
+    CUDA_VISIBLE_DEVICES=7 python il/deploy_il.py --config_path=config/il/act_franka.yaml --headless --max_steps=2000 --video=./outputs/act.mp4
 
 脚本会从 ``output_dir/checkpoints/last/pretrained_model`` 加载最新检查点，
 并根据检查点中的 ``input_features`` 自动决定使用主相机、腕部相机
@@ -18,6 +19,11 @@ import os
 import sys
 from pathlib import Path
 
+# 必须在导入 mujoco/SimpleEnv 之前选择 EGL，否则无桌面服务器会退回 GLFW/llvmpipe。
+if "--headless" in sys.argv:
+    os.environ.setdefault("MUJOCO_GL", "egl")
+
+import cv2
 import numpy as np
 import torch
 import yaml
@@ -37,7 +43,6 @@ os.chdir(PROJECT_ROOT)
 
 from lerobot.common.policies.factory import get_policy_class
 from lerobot.configs.policies import PreTrainedConfig
-from mujoco_env.SimpleEnv1 import SimpleEnv
 
 
 SUPPORTED_POLICIES = {"act", "diffusion"}
@@ -51,6 +56,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=0, help="MuJoCo scene seed.")
     parser.add_argument("--control_hz", type=int, default=20, help="Policy control frequency.")
     parser.add_argument("--max_steps", type=int, default=0, help="Stop after N policy steps; 0 means unlimited.")
+    parser.add_argument("--headless", action="store_true", help="Run without a GLFW window using EGL rendering.")
+    parser.add_argument("--video", default=None, help="MP4 output path; defaults to outputs/<policy>_seed<N>.mp4.")
+    parser.add_argument("--render_width", type=int, default=400, help="Headless camera width.")
+    parser.add_argument("--render_height", type=int, default=300, help="Headless camera height.")
     return parser.parse_args()
 
 
@@ -112,8 +121,37 @@ def build_observation(policy, state: np.ndarray, agent_image: np.ndarray, wrist_
     return {key: value.to(policy.config.device) for key, value in observation.items()}
 
 
+def video_frame(agent_image: np.ndarray, wrist_image: np.ndarray, step: int) -> np.ndarray:
+    """把策略使用的两路 RGB 观测并排合成为一帧 MP4（OpenCV 使用 BGR）。"""
+    height = min(agent_image.shape[0], wrist_image.shape[0])
+    width = min(agent_image.shape[1], wrist_image.shape[1])
+    agent = cv2.resize(agent_image, (width, height), interpolation=cv2.INTER_AREA)
+    wrist = cv2.resize(wrist_image, (width, height), interpolation=cv2.INTER_AREA)
+    frame = np.concatenate([agent, wrist], axis=1)
+    cv2.putText(frame, "Agent View", (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+    cv2.putText(frame, "Wrist View", (width + 12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+    cv2.putText(frame, f"Step {step}", (12, height - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 0), 2)
+    return cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+
+
+def open_video(path: Path, width: int, height: int, fps: int) -> cv2.VideoWriter:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (width * 2, height))
+    if not writer.isOpened():
+        raise RuntimeError(f"无法创建 MP4 视频：{path}。请检查 OpenCV/FFmpeg 编码支持。")
+    return writer
+
+
 def main() -> None:
     args = parse_args()
+    if args.headless and args.max_steps <= 0:
+        raise ValueError("无头模式必须设置 --max_steps，避免没有窗口关闭按钮时无限运行。")
+    if args.render_width <= 0 or args.render_height <= 0:
+        raise ValueError("render_width 和 render_height 必须大于 0。")
+
+    # 延迟导入，确保上面的 MUJOCO_GL=egl 在 mujoco 第一次加载之前生效。
+    from mujoco_env.SimpleEnv1 import SimpleEnv
+
     train_config = load_yaml(args.config_path)
     requested_type = train_config.get("policy", {}).get("type")
     if requested_type not in SUPPORTED_POLICIES:
@@ -147,10 +185,20 @@ def main() -> None:
         seed=args.seed,
         action_type="joint_angle",
         state_type="joint_angle",
+        headless=args.headless,
+        render_width=args.render_width,
+        render_height=args.render_height,
     )
+    video_path = None
+    writer = None
+    if args.headless:
+        video_path = Path(args.video or f"./outputs/{requested_type}_seed{args.seed}.mp4").expanduser().resolve()
+        writer = open_video(video_path, args.render_width, args.render_height, args.control_hz)
+        print(f"Headless EGL mode: video will be saved to {video_path}")
+
     step = 0
     try:
-        while env.env.is_viewer_alive():
+        while args.headless or env.env.is_viewer_alive():
             env.step_env()
             if not env.env.loop_every(HZ=args.control_hz):
                 continue
@@ -163,7 +211,10 @@ def main() -> None:
                 action = policy.select_action(observation)
             action = action.squeeze(0).detach().cpu().numpy()
             env.step(action)
-            env.render()
+            if args.headless:
+                writer.write(video_frame(agent_image, wrist_image, step))
+            else:
+                env.render()
             step += 1
 
             if env.check_success():
@@ -173,7 +224,10 @@ def main() -> None:
                 print(f"Reached max_steps={args.max_steps}.")
                 break
     finally:
-        env.env.close_viewer()
+        if writer is not None:
+            writer.release()
+            print(f"MP4 已保存：{video_path}")
+        env.close()
 
 
 if __name__ == "__main__":

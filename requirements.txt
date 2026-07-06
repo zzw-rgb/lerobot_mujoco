@@ -1,6 +1,7 @@
 mujoco==3.1.6
 pyautogui
 matplotlib
+opencv-python
 scipy
 safetensors==0.5.3
 datasets==3.4.1

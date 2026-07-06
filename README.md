@@ -245,10 +245,41 @@ cd ../..                # 回到项目根目录
 
 ### 5. 关于"无显示器"的服务器
 
-- **需要图形界面（有显示器/桌面）的脚本**：所有遥操作采集（`collect_data_il.py`、`collect_data_language.py`）和带窗口回放/部署的脚本。
-- **纯命令行服务器即可**：训练脚本（`train_il.py`、`train_vla.py`）、上传脚本（`push_dataset_*.py`）。
+- **需要图形界面（有显示器/桌面）的脚本**：所有遥操作采集（`collect_data_il.py`、`collect_data_language.py`）和带窗口回放脚本。
+- **纯命令行服务器即可**：训练脚本、上传脚本，以及带 `--headless` 的 `deploy_il.py`。无头部署使用 EGL 离屏渲染，并把两路相机结果保存为 MP4。
 
 > 如果只有一台无显示器的 GPU 服务器，可以在本地采集数据，或用 `push_dataset_il.py` / `push_dataset_language.py` 上传后在服务器训练。
+> 无头部署需要 NVIDIA 驱动提供 EGL；脚本会在导入 MuJoCo 前自动设置 `MUJOCO_GL=egl`。
+
+### 6. 用 Git 把本机修改同步到 Linux 服务器
+
+先在修改代码的电脑上提交并推送。本次无头部署涉及以下文件：
+
+```bash
+git add .gitignore README.md requirements.txt il/deploy_il.py mujoco_env/SimpleEnv1.py
+git commit -m "feat: add headless deployment and mp4 recording"
+git push origin main
+```
+
+然后在 Linux 服务器的项目目录拉取更新：
+
+```bash
+cd ~/all_users/z_work/lerobot_mujoco && git pull --ff-only origin main
+```
+
+如果 Linux 端提示本地修改会被覆盖，先把服务器上的修改安全暂存，再拉取：
+
+```bash
+cd ~/all_users/z_work/lerobot_mujoco && git stash push -u -m "linux-backup-before-update" && git pull --ff-only origin main
+```
+
+可以用 `git stash list` 查看备份；只有确实需要恢复服务器旧修改时才运行 `git stash pop`。`demo_data`、`ckpt` 和 `outputs` 已被 `.gitignore` 忽略，拉取代码不会覆盖数据集、检查点或视频。
+
+本次新增了 OpenCV 视频写入依赖，Linux 更新代码后安装一次：
+
+```bash
+pip install opencv-python
+```
 
 ---
 
@@ -508,6 +539,14 @@ python il/deploy_il.py --config_path=config/il/diffusion_franka.yaml
 ```
 
 `deploy_il.py` 从同一份 YAML 获取策略类型和 `output_dir`，自动定位最新检查点，再从检查点的 `input_features` 生成它需要的相机/状态输入。20 Hz 闭环中调用 `policy.select_action()`，并以 `action_type="joint_angle"` 将模型输出解释为“7 个绝对关节角 + 夹爪”；同一脚本即可部署 ACT 或 Diffusion。
+
+无桌面 Linux 服务器可直接离屏运行并保存 MP4（MP3 只能保存音频，不能保存画面）：
+
+```bash
+CUDA_VISIBLE_DEVICES=7 python il/deploy_il.py --config_path=config/il/act_franka.yaml --checkpoint=./ckpt/act_franka/checkpoints/020000/pretrained_model --device=cuda --seed=0 --max_steps=2000 --headless --video=./outputs/act_seed0.mp4
+```
+
+无头模式不会创建 GLFW 窗口，默认以 `400×300` 分辨率分别渲染主相机和腕部相机，再横向合成为视频。`--max_steps` 在无头模式下必须大于 0；视频按 `--control_hz`（默认 20 FPS）写入。需要更低的渲染开销时，可添加 `--render_width=320 --render_height=240`。
 
 ### 步骤 5：采集语言条件数据（`collect_data_language.py`）
 
