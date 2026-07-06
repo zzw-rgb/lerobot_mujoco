@@ -34,7 +34,7 @@ SmolVLA 更小、更省显存、推理更快，但模型容量小一些；
 （“语言条件”= 机器人的行为由一句语言指令来决定/引导。）
 
 训练 SmolVLA 请在终端运行：
-    python vla/train_vla.py --config_path config/vla/smolvla_franka.yaml
+    python vla/train_vla.py --config_path=config/vla/smolvla_franka.yaml
 
 部署运行方式（需要 GPU + 图形界面）：
     conda activate lerobot
@@ -94,7 +94,7 @@ _os.chdir(_PROJECT_ROOT)
 # 训练很耗时也耗显卡，通常在另一台带 GPU 的机器上单独跑一次即可，
 # 跑完会得到权重文件（见后面 from_pretrained 加载的那个路径）。
 # 部署阶段（本脚本）不需要重新训练，直接加载现成权重就行。
-# [终端命令] python vla/train_vla.py --config_path config/vla/smolvla_franka.yaml
+# [终端命令] python vla/train_vla.py --config_path=config/vla/smolvla_franka.yaml
 
 # ======================================================================
 # ## 步骤 3. 部署

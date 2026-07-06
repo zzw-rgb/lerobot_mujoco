@@ -24,7 +24,7 @@
 ==============================================================================================
 
 训练 π0 请在终端运行（train_vla.py 即原 train_model.py 改名而来）：
-    python vla/train_vla.py --config_path config/vla/pi0_franka.yaml
+    python vla/train_vla.py --config_path=config/vla/pi0_franka.yaml
 
 部署运行方式（需要 GPU + 图形界面）：
     conda activate lerobot
@@ -120,7 +120,7 @@ vla/collect_data_language.py 采集得到，带语言指令，用于训练“听
 
 # 步骤 2 的训练命令：在终端里运行下面这行，开始用配置文件训练 π0。
 # （train_vla.py 就是原来的 train_model.py，只是改了个更贴切的名字：train VLA = 训练 VLA 模型）
-# [终端命令] python vla/train_vla.py --config_path config/vla/pi0_franka.yaml
+# [终端命令] python vla/train_vla.py --config_path=config/vla/pi0_franka.yaml
 
 # ======================================================================
 # ## 步骤 3. 部署

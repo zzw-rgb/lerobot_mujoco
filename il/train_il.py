@@ -8,8 +8,8 @@
 
 示例：
 
-    python il/train_il.py --config_path config/il/act_franka.yaml
-    python il/train_il.py --config_path config/il/diffusion_franka.yaml
+    python il/train_il.py --config_path=config/il/act_franka.yaml
+    python il/train_il.py --config_path=config/il/diffusion_franka.yaml
 
 本文件直接复用当前 LeRobot 版本的通用训练器，因此优化器、
 学习率调度、断点续训和检查点格式与 VLA 训练流程保持一致。

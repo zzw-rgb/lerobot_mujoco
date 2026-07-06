@@ -3,8 +3,8 @@
 
 训练和部署使用同一份 YAML：
 
-    python il/deploy_il.py --config_path config/il/act_franka.yaml
-    python il/deploy_il.py --config_path config/il/diffusion_franka.yaml
+    python il/deploy_il.py --config_path=config/il/act_franka.yaml
+    python il/deploy_il.py --config_path=config/il/diffusion_franka.yaml
 
 脚本会从 ``output_dir/checkpoints/last/pretrained_model`` 加载最新检查点，
 并根据检查点中的 ``input_features`` 自动决定使用主相机、腕部相机
@@ -140,7 +140,14 @@ def main() -> None:
     print(f"Device: {device}")
     print(f"Inputs: {list(policy.config.input_features)}")
 
-    env = SimpleEnv("./asset/example_scene_y.xml", seed=args.seed, state_type="joint_angle")
+    # 数据集中的 action 是“7 个绝对关节角 + 夹爪”，部署时必须用 joint_angle 执行。
+    # 若沿用 SimpleEnv 默认的 eef_pose，模型输出会被误当成末端位姿增量，导致机械臂乱动。
+    env = SimpleEnv(
+        "./asset/example_scene_y.xml",
+        seed=args.seed,
+        action_type="joint_angle",
+        state_type="joint_angle",
+    )
     step = 0
     try:
         while env.env.is_viewer_alive():
