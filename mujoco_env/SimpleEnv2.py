@@ -9,24 +9,33 @@ from mujoco_env.transforms import rpy2r, r2rpy
 import os
 import copy
 import glfw
+import mujoco
 
 class SimpleEnv2:
     def __init__(self, 
                  xml_path,
                 action_type='eef_pose', 
                 state_type='joint_angle',
-                seed = None):
+                seed = None,
+                headless=False,
+                render_width=400,
+                render_height=300):
         """
         参数:
             xml_path: str, xml 文件的路径
             action_type: str, 动作空间类型, 'eef_pose'、'delta_joint_angle' 或 'joint_angle'
             state_type: str, 状态空间类型, 'joint_angle' 或 'ee_pose'
             seed: int, 随机数生成器的种子
+            headless: bool, True 时不创建 GLFW 窗口，使用离屏渲染
         """
         # 加载 xml 文件
         self.env = MuJoCoParserClass(name='Tabletop',rel_xml_path=xml_path)
         self.action_type = action_type
         self.state_type = state_type
+        self.headless = headless
+        self.render_width = render_width
+        self.render_height = render_height
+        self.offscreen_renderer = None
 
         self.joint_names = ['joint1',
                     'joint2',
@@ -35,8 +44,20 @@ class SimpleEnv2:
                     'joint5',
                     'joint6',
                     'joint7',]
-        self.init_viewer()
+        if self.headless:
+            self.init_headless_renderer()
+        else:
+            self.init_viewer()
         self.reset(seed)
+
+    def init_headless_renderer(self):
+        """初始化 EGL/OSMesa 离屏渲染器。"""
+        self.env.reset()
+        self.offscreen_renderer = mujoco.Renderer(
+            self.env.model,
+            height=self.render_height,
+            width=self.render_width,
+        )
 
     def init_viewer(self):
         '''
@@ -57,7 +78,9 @@ class SimpleEnv2:
         重置环境
         将机器人移动到初始位置, 根据种子设置物体位置
         '''
-        if seed is not None: np.random.seed(seed)
+        if seed is not None:
+            np.random.seed(seed)
+            random.seed(seed)
         q_init = np.array([0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785])  # Franka Panda home 位姿(7 关节)
         q_zero,ik_err_stack,ik_info = solve_ik(
             env = self.env,
@@ -203,15 +226,25 @@ class SimpleEnv2:
             rgb_agent: np.array, 来自智能体视角的 rgb 图像
             rgb_ego: np.array, 来自第一人称视角的 rgb 图像
         '''
-        self.rgb_agent = self.env.get_fixed_cam_rgb(
-            cam_name='agentview')
-        self.rgb_ego = self.env.get_fixed_cam_rgb(
-            cam_name='egocentric')
-        # self.rgb_top = self.env.get_fixed_cam_rgbd_pcd(
-        #     cam_name='topview')
-        self.rgb_side = self.env.get_fixed_cam_rgb(
-            cam_name='sideview')
+        if self.headless:
+            self.offscreen_renderer.update_scene(self.env.data, camera='agentview')
+            self.rgb_agent = self.offscreen_renderer.render().copy()
+            self.offscreen_renderer.update_scene(self.env.data, camera='egocentric')
+            self.rgb_ego = self.offscreen_renderer.render().copy()
+        else:
+            self.rgb_agent = self.env.get_fixed_cam_rgb(cam_name='agentview')
+            self.rgb_ego = self.env.get_fixed_cam_rgb(cam_name='egocentric')
+            self.rgb_side = self.env.get_fixed_cam_rgb(cam_name='sideview')
         return self.rgb_agent, self.rgb_ego
+
+    def close(self):
+        """释放有窗口或离屏渲染资源。"""
+        if self.headless:
+            if self.offscreen_renderer is not None:
+                self.offscreen_renderer.close()
+                self.offscreen_renderer = None
+        else:
+            self.env.close_viewer()
         
 
     def render(self, teleop=False, idx = 0):

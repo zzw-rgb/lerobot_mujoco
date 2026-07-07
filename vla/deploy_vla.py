@@ -1,16 +1,4 @@
-"""
-统一部署 ACT / Diffusion Policy。
-
-训练和部署使用同一份 YAML：
-
-    python il/deploy_il.py --config_path=config/il/act_franka.yaml
-    python il/deploy_il.py --config_path=config/il/diffusion_franka.yaml
-    CUDA_VISIBLE_DEVICES=7 python il/deploy_il.py --config_path=config/il/act_franka.yaml --headless --max_steps=2000 --video=./outputs/act.mp4
-
-脚本会从 ``output_dir/checkpoints/last/pretrained_model`` 加载最新检查点，
-并根据检查点中的 ``input_features`` 自动决定使用主相机、腕部相机
-和末端位姿，不再在部署脚本里重复手写模型配置。
-"""
+"""统一部署 π0 / SmolVLA，支持窗口、EGL 无头视频和多随机种子评估。"""
 
 from __future__ import annotations
 
@@ -19,7 +7,7 @@ import os
 import sys
 from pathlib import Path
 
-# 必须在导入 mujoco/SimpleEnv 之前选择 EGL，否则无桌面服务器会退回 GLFW/llvmpipe。
+# 必须在导入 mujoco/SimpleEnv2 之前选择 EGL。
 if "--headless" in sys.argv:
     os.environ["MUJOCO_GL"] = "egl"
 
@@ -30,16 +18,12 @@ from PIL import Image
 from torchvision.transforms.functional import to_tensor
 
 
-for stream in (sys.stdout, sys.stderr):
-    if hasattr(stream, "reconfigure"):
-        stream.reconfigure(encoding="utf-8", errors="replace")
-
-
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 os.chdir(PROJECT_ROOT)
 
+from lerobot.common.datasets.lerobot_dataset import LeRobotDatasetMetadata
 from lerobot.common.policies.factory import get_policy_class
 from lerobot.configs.policies import PreTrainedConfig
 from mujoco_env.eval_utils import (
@@ -52,21 +36,22 @@ from mujoco_env.eval_utils import (
 )
 
 
-SUPPORTED_POLICIES = {"act", "diffusion"}
+SUPPORTED_POLICIES = {"pi0", "smolvla"}
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Deploy an ACT or Diffusion Policy checkpoint in MuJoCo.")
-    parser.add_argument("--config_path", required=True, help="Training YAML used to select policy/output_dir.")
+    parser = argparse.ArgumentParser(description="Deploy a π0 or SmolVLA checkpoint in MuJoCo.")
+    parser.add_argument("--config_path", required=True, help="Training YAML used to select policy/dataset/output_dir.")
     parser.add_argument("--checkpoint", default=None, help="Optional pretrained_model directory override.")
-    parser.add_argument("--device", default=None, help="cuda, cpu, or mps. Defaults to YAML/checkpoint setting.")
-    parser.add_argument("--seed", type=int, default=0, help="MuJoCo scene seed.")
-    parser.add_argument("--control_hz", type=int, default=20, help="Policy control frequency.")
-    parser.add_argument("--max_steps", type=int, default=0, help="Stop after N policy steps; 0 means unlimited.")
-    parser.add_argument("--headless", action="store_true", help="Run without a GLFW window using EGL rendering.")
-    parser.add_argument("--video", default=None, help="MP4 output path; defaults to outputs/<policy>_seed<N>.mp4.")
-    parser.add_argument("--render_width", type=int, default=400, help="Headless camera width.")
-    parser.add_argument("--render_height", type=int, default=300, help="Headless camera height.")
+    parser.add_argument("--device", default=None, help="cuda or cpu. Defaults to YAML/checkpoint setting.")
+    parser.add_argument("--seed", type=int, default=0, help="First MuJoCo scene seed.")
+    parser.add_argument("--instruction", default=None, help="Optional fixed red/blue instruction for every episode.")
+    parser.add_argument("--control_hz", type=int, default=20)
+    parser.add_argument("--max_steps", type=int, default=0)
+    parser.add_argument("--headless", action="store_true")
+    parser.add_argument("--video", default=None, help="Base MP4 path.")
+    parser.add_argument("--render_width", type=int, default=400)
+    parser.add_argument("--render_height", type=int, default=300)
     parser.add_argument(
         "--random_seeds",
         type=int,
@@ -77,12 +62,11 @@ def parse_args() -> argparse.Namespace:
 
 
 def load_yaml(path: str | Path) -> dict:
-    config_path = Path(path).expanduser().resolve()
-    if not config_path.is_file():
-        raise FileNotFoundError(f"Config file not found: {config_path}")
-    with config_path.open("r", encoding="utf-8") as file:
-        config = yaml.safe_load(file) or {}
-    return config
+    path = Path(path).expanduser().resolve()
+    if not path.is_file():
+        raise FileNotFoundError(f"Config file not found: {path}")
+    with path.open("r", encoding="utf-8") as file:
+        return yaml.safe_load(file) or {}
 
 
 def resolve_checkpoint(config: dict, override: str | None) -> Path:
@@ -93,21 +77,21 @@ def resolve_checkpoint(config: dict, override: str | None) -> Path:
         candidates = [
             output_dir / "checkpoints" / "last" / "pretrained_model",
             output_dir / "pretrained_model",
-            output_dir,  # 兼容旧版直接 save_pretrained(output_dir) 的 ACT 检查点
+            output_dir,
         ]
         checkpoints_dir = output_dir / "checkpoints"
         if checkpoints_dir.is_dir():
-            numbered = sorted(
-                (path / "pretrained_model" for path in checkpoints_dir.iterdir() if path.name.isdigit()),
-                reverse=True,
+            candidates.extend(
+                sorted(
+                    (path / "pretrained_model" for path in checkpoints_dir.iterdir() if path.name.isdigit()),
+                    reverse=True,
+                )
             )
-            candidates.extend(numbered)
 
     for candidate in candidates:
         candidate = candidate.expanduser().resolve()
         if (candidate / "config.json").is_file() and (candidate / "model.safetensors").is_file():
             return candidate
-
     rendered = "\n  - ".join(str(path) for path in candidates)
     raise FileNotFoundError(f"No deployable checkpoint found. Checked:\n  - {rendered}")
 
@@ -116,11 +100,10 @@ def image_tensor(image: np.ndarray, feature) -> torch.Tensor:
     channels, height, width = feature.shape
     if channels != 3:
         raise ValueError(f"Expected RGB input, got feature shape {feature.shape}")
-    pil_image = Image.fromarray(image).resize((width, height))
-    return to_tensor(pil_image).unsqueeze(0)
+    return to_tensor(Image.fromarray(image).resize((width, height))).unsqueeze(0)
 
 
-def build_observation(policy, state: np.ndarray, agent_image: np.ndarray, wrist_image: np.ndarray) -> dict:
+def build_observation(policy, state: np.ndarray, agent_image: np.ndarray, wrist_image: np.ndarray, task: str) -> dict:
     observation = {}
     for key, feature in policy.config.input_features.items():
         if key == "observation.state":
@@ -130,18 +113,22 @@ def build_observation(policy, state: np.ndarray, agent_image: np.ndarray, wrist_
         elif key == "observation.wrist_image":
             observation[key] = image_tensor(wrist_image, feature)
         else:
-            raise KeyError(f"Deployment does not know how to produce required feature: {key}")
-    return {key: value.to(policy.config.device) for key, value in observation.items()}
+            raise KeyError(f"VLA deployment does not know how to produce required feature: {key}")
+    observation = {key: value.to(policy.config.device) for key, value in observation.items()}
+    observation["task"] = [task]
+    return observation
 
 
 def run_episode(policy, env, args: argparse.Namespace, seed: int, video_path: Path | None) -> EpisodeResult:
-    """运行一个完整回合，返回是否成功、执行步数和视频路径。"""
     env.reset(seed)
+    if args.instruction:
+        env.set_instruction(args.instruction)
+    instruction = env.instruction
     policy.reset()
     writer = None
     if video_path is not None:
         writer = open_video(video_path, args.render_width, args.render_height, args.control_hz)
-        print(f"Seed {seed}: video -> {video_path}")
+        print(f"Seed {seed}: {instruction} | video -> {video_path}")
 
     step = 0
     success = False
@@ -151,23 +138,23 @@ def run_episode(policy, env, args: argparse.Namespace, seed: int, video_path: Pa
             if not env.env.loop_every(HZ=args.control_hz):
                 continue
 
-            state = env.get_ee_pose()
+            state = env.get_joint_state()[:7]
             agent_image, wrist_image = env.grab_image()
-            observation = build_observation(policy, state, agent_image, wrist_image)
-
+            observation = build_observation(policy, state, agent_image, wrist_image, instruction)
             with torch.inference_mode():
                 action = policy.select_action(observation)
-            action = action.squeeze(0).detach().cpu().numpy()
+            action = action.squeeze(0).detach().cpu().numpy()[:8]
             env.step(action)
+
             if writer is not None:
-                writer.write(video_frame(agent_image, wrist_image, step))
+                writer.write(video_frame(agent_image, wrist_image, step, instruction))
             else:
                 env.render()
             step += 1
 
             success = env.check_success()
             if success:
-                print(f"Seed {seed}: 成功，steps={step}")
+                print(f"Seed {seed}: 成功，steps={step}，instruction={instruction!r}")
                 break
             if args.max_steps > 0 and step >= args.max_steps:
                 print(f"Seed {seed}: 达到 max_steps={args.max_steps}，未成功。")
@@ -176,20 +163,26 @@ def run_episode(policy, env, args: argparse.Namespace, seed: int, video_path: Pa
         if writer is not None:
             writer.release()
 
-    return EpisodeResult(seed=seed, success=success, steps=step, video=str(video_path) if video_path else None)
+    return EpisodeResult(
+        seed=seed,
+        success=success,
+        steps=step,
+        video=str(video_path) if video_path else None,
+        instruction=instruction,
+    )
 
 
 def main() -> None:
     args = parse_args()
     if args.headless and args.max_steps <= 0:
-        raise ValueError("无头模式必须设置 --max_steps，避免没有窗口关闭按钮时无限运行。")
+        raise ValueError("无头模式必须设置 --max_steps。")
     if args.render_width <= 0 or args.render_height <= 0:
         raise ValueError("render_width 和 render_height 必须大于 0。")
     if args.random_seeds < 0:
         raise ValueError("random_seeds 不能小于 0。")
 
-    # 延迟导入，确保上面的 MUJOCO_GL=egl 在 mujoco 第一次加载之前生效。
-    from mujoco_env.SimpleEnv1 import SimpleEnv
+    # 延迟导入，确保 EGL 后端在 mujoco 第一次加载前生效。
+    from mujoco_env.SimpleEnv2 import SimpleEnv2
 
     train_config = load_yaml(args.config_path)
     requested_type = train_config.get("policy", {}).get("type")
@@ -204,22 +197,27 @@ def main() -> None:
         )
 
     device = args.device or train_config.get("policy", {}).get("device") or policy_config.device
-    if device == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError("CUDA was requested but torch.cuda.is_available() is False. Use --device cpu if needed.")
+    if str(device).startswith("cuda") and not torch.cuda.is_available():
+        raise RuntimeError("CUDA was requested but torch.cuda.is_available() is False.")
     policy_config.device = device
+
+    dataset_config = train_config.get("dataset", {})
+    dataset_root = Path(dataset_config.get("root", "./demo_data_language")).expanduser().resolve()
+    dataset_metadata = LeRobotDatasetMetadata(dataset_config.get("repo_id", "franka_pnp_language"), root=dataset_root)
     policy_cls = get_policy_class(policy_config.type)
-    policy = policy_cls.from_pretrained(checkpoint, config=policy_config)
+    policy = policy_cls.from_pretrained(
+        checkpoint,
+        config=policy_config,
+        dataset_stats=dataset_metadata.stats,
+    )
     policy.eval()
 
     print(f"Policy: {policy_config.type}")
     print(f"Checkpoint: {checkpoint}")
     print(f"Device: {device}")
-    print(f"Inputs: {list(policy.config.input_features)}")
 
-    # 数据集中的 action 是“7 个绝对关节角 + 夹爪”，部署时必须用 joint_angle 执行。
-    # 若沿用 SimpleEnv 默认的 eef_pose，模型输出会被误当成末端位姿增量，导致机械臂乱动。
-    env = SimpleEnv(
-        "./asset/example_scene_y.xml",
+    env = SimpleEnv2(
+        "./asset/example_scene_y2.xml",
         seed=args.seed,
         action_type="joint_angle",
         state_type="joint_angle",
@@ -237,7 +235,6 @@ def main() -> None:
         first_video = video_path_for_seed(base_video, args.seed) if base_video else None
         first_result = run_episode(policy, env, args, args.seed, first_video)
         results.append(first_result)
-
         if args.headless and first_result.success and args.random_seeds > 0:
             extra_seeds = sample_random_seeds(args.seed, args.random_seeds)
             print(f"首轮成功，开始评估 {len(extra_seeds)} 个随机种子：{extra_seeds}")
