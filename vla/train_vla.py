@@ -27,8 +27,10 @@
 
 运行方式（在配置文件里写好所有超参数，然后用 --config_path 指定它）：
 
+    # 单卡
     python vla/train_vla.py --config_path=config/vla/pi0_franka.yaml
-    python vla/train_vla.py --config_path=config/vla/smolvla_franka.yaml
+    # 多卡（N=参与训练的 GPU 数量，分布式数据并行 DDP）
+    accelerate launch --num_processes=N vla/train_vla.py --config_path=config/vla/pi0_franka.yaml
 
 整体流程概览：
     1. 读取 yaml 配置 → 构造 cfg（由 @parser.wrap() 自动完成，见 train 函数说明）
@@ -56,8 +58,9 @@ from pprint import pformat
 from typing import Any
 
 import torch
+from accelerate import Accelerator
+from accelerate.utils import DistributedDataParallelKwargs
 from termcolor import colored
-from torch.amp import GradScaler
 from torch.optim import Optimizer
 
 from lerobot.common.datasets.factory import make_dataset
@@ -67,7 +70,6 @@ from lerobot.common.envs.factory import make_env
 from lerobot.common.optim.factory import make_optimizer_and_scheduler
 from lerobot.common.policies.factory import make_policy
 from lerobot.common.policies.pretrained import PreTrainedPolicy
-from lerobot.common.policies.utils import get_device_from_parameters
 from lerobot.common.utils.logging_utils import AverageMeter, MetricsTracker
 from lerobot.common.utils.random_utils import set_seed
 from lerobot.common.utils.train_utils import (
@@ -79,7 +81,6 @@ from lerobot.common.utils.train_utils import (
 )
 from lerobot.common.utils.utils import (
     format_big_number,
-    get_safe_torch_device,
     has_method,
     init_logging,
 )
@@ -97,14 +98,16 @@ from lerobot.scripts.eval import eval_policy
 #       到 train_metrics 里返回。
 #
 # 完整流程：
-#   1. policy.train()            把网络切到训练模式（启用 dropout、BN 统计更新等）
-#   2. policy.forward(batch)     前向传播，得到本批数据的损失 loss
-#   3. loss.backward()           反向传播，自动求出每个参数的梯度
-#   4. 梯度裁剪                   把过大的梯度"削平"，防止梯度爆炸导致训练发散
-#   5. optimizer.step()          按梯度更新网络参数（真正"学习"的一步）
-#   6. lr_scheduler.step()       推进学习率调度（让学习率随训练逐步变化）
+#   1. policy.train()                 切到训练模式（启用 dropout、BN 统计更新等）
+#   2. accelerator.autocast()+forward 前向传播，得到本批数据的损失 loss
+#   3. accelerator.backward(loss)     反向传播求梯度；多卡下在此处自动对各卡梯度做同步
+#   4. accelerator.clip_grad_norm_    梯度裁剪，防止梯度爆炸导致训练发散
+#   5. optimizer.step()               按梯度更新网络参数（真正"学习"的一步）
+#   6. lr_scheduler.step()            推进学习率调度（让学习率随训练逐步变化）
 #
-# 其中第 2~5 步还叠加了"混合精度训练（AMP）"机制（见下方各处注释）。
+# 混合精度（AMP）与梯度缩放由 accelerator 统一接管：以 mixed_precision="bf16" 创建
+# Accelerator 时 autocast 与梯度反缩放/裁剪会自动生效，为 "no" 时等价于全精度训练，
+# 因此这里不再手动维护 GradScaler。
 # =============================================================================
 def update_policy(
     train_metrics: MetricsTracker,
@@ -112,52 +115,29 @@ def update_policy(
     batch: Any,
     optimizer: Optimizer,
     grad_clip_norm: float,
-    grad_scaler: GradScaler,
+    accelerator: Accelerator,
     lr_scheduler=None,
-    use_amp: bool = False,
-    lock=None,
 ) -> tuple[MetricsTracker, dict]:
     start_time = time.perf_counter()
-    device = get_device_from_parameters(policy)
     policy.train()  # 切换到训练模式
-    # torch.autocast：混合精度（AMP）上下文。开启后，前向计算中合适的算子会自动
-    # 用半精度（float16/bfloat16）运行，从而省显存、提速；不开启时用 nullcontext()
-    # 这个"什么都不做"的占位上下文，等价于普通的全精度（float32）前向。
-    with torch.autocast(device_type=device.type) if use_amp else nullcontext():
+    # accelerator.autocast()：按创建 Accelerator 时设定的 mixed_precision 决定是否
+    # 启用半精度（bfloat16）前向；设为 "no" 时它是“什么都不做”的上下文，等价于全精度。
+    with accelerator.autocast():
         # 前向传播：策略内部会读取 batch 里的图像/状态/语言/目标动作，算出损失 loss。
         # loss 越小，代表策略预测的动作越接近示教数据里的真实动作。
         loss, output_dict = policy.forward(batch)
         # TODO(rcadene): policy.unnormalize_outputs(out_dict)
-    # 反向传播。混合精度下，先用 grad_scaler 把 loss 放大（scale）再 backward，
-    # 这样反传出来的小梯度不会因半精度表示范围有限而被"舍入成 0"（即梯度下溢）。
-    grad_scaler.scale(loss).backward()
 
-    # 在梯度裁剪**之前**原地反缩放（unscale）优化器所分配参数的梯度（混合精度）。
-    # 为什么"先反缩放再裁剪"：上一步 backward 出来的梯度是被放大过的（乘了 scale 因子），
-    # 而下面的梯度裁剪是按"梯度范数的真实大小"来判断是否需要削减的。如果不先还原成
-    # 真实尺度就裁剪，阈值 grad_clip_norm 的含义就乱了。所以必须先 unscale_ 还原，
-    # 再做裁剪，才能保证裁剪阈值是针对真实梯度而言的。
-    grad_scaler.unscale_(optimizer)
+    # 反向传播。accelerator.backward 会在混合精度下自动完成梯度缩放；在多卡（DDP）下，
+    # 它还负责把各进程的梯度做 all-reduce 同步，使每张卡上的参数保持一致。
+    accelerator.backward(loss)
 
-    # 梯度裁剪：把所有参数梯度拼成一个整体向量，若其范数超过 grad_clip_norm，
-    # 就按比例缩小到该阈值。这能防止偶发的超大梯度把参数"一步带飞"（梯度爆炸），
-    # 是训练 Transformer / VLA 这类大模型时常用的稳定手段。返回值是裁剪前的梯度范数，
-    # 可作为监控指标观察训练是否稳定。
-    grad_norm = torch.nn.utils.clip_grad_norm_(
-        policy.parameters(),
-        grad_clip_norm,
-        error_if_nonfinite=False,
-    )
+    # 梯度裁剪：把所有参数梯度拼成一个整体向量，若其范数超过 grad_clip_norm，就按比例
+    # 缩小到该阈值，防止偶发的超大梯度把参数“一步带飞”（梯度爆炸）。accelerator 会在
+    # 裁剪前自动反缩放梯度（若启用了混合精度），返回值是裁剪前的梯度范数，可作监控。
+    grad_norm = accelerator.clip_grad_norm_(policy.parameters(), grad_clip_norm)
 
-    # 优化器的梯度此时已被反缩放，因此 scaler.step 不会再次反缩放它们；
-    # 但如果梯度中包含 inf 或 NaN（混合精度下偶尔发生），它会自动**跳过**本次
-    # optimizer.step()，从而避免用坏掉的梯度污染参数。lock 用于多线程/多进程场景
-    # 下保护参数更新，单卡普通训练时为 None，走 nullcontext() 即可。
-    with lock if lock is not None else nullcontext():
-        grad_scaler.step(optimizer)  # 真正按梯度更新一次网络参数
-    # 根据本次是否出现过 inf/NaN，动态调整下一次迭代使用的放大因子 scale（混合精度）。
-    grad_scaler.update()
-
+    optimizer.step()       # 真正按梯度更新一次网络参数
     optimizer.zero_grad()  # 清空梯度，否则梯度会在下一次 backward 时累加
 
     # 在每个 batch（而非每个 epoch）上推进 PyTorch 的学习率调度器，
@@ -165,15 +145,16 @@ def update_policy(
     if lr_scheduler is not None:
         lr_scheduler.step()
 
-    if has_method(policy, "update"):
-        # 用于可能需要更新内部缓冲区的情况（例如 TDMPC 中的指数滑动平均 EMA）。
-        policy.update()
+    # 用于可能需要更新内部缓冲区的情况（例如 TDMPC 中的指数滑动平均 EMA）。多卡下
+    # policy 被 DDP 包装，需先 unwrap 取回原始策略再调用其自定义方法。
+    unwrapped_policy = accelerator.unwrap_model(policy)
+    if has_method(unwrapped_policy, "update"):
+        unwrapped_policy.update()
 
     # 记录本次更新的训练指标，供主循环打印日志、上传 wandb 使用。
     # .item() 把 GPU 上的标量张量转成普通 Python 数值。
-
     train_metrics.loss = loss.item()
-    train_metrics.grad_norm = grad_norm.item()
+    train_metrics.grad_norm = grad_norm.item() if grad_norm is not None else 0.0
     train_metrics.lr = optimizer.param_groups[0]["lr"]
     train_metrics.update_s = time.perf_counter() - start_time
     return train_metrics, output_dict
@@ -200,23 +181,42 @@ def update_policy(
 @parser.wrap()
 def train(cfg: TrainPipelineConfig):
     cfg.validate()  # 校验配置合法性（参数齐全、取值合理等）
-    logging.info(pformat(cfg.to_dict()))  # 把最终生效的完整配置打印出来，便于复现
+
+    # === 多卡/分布式训练初始化（Accelerate）===
+    # Accelerator 统一管理进程组、设备分配、混合精度与梯度同步。用普通
+    # `python vla/train_vla.py ...` 启动时它自动退化为单卡；用
+    # `accelerate launch --num_processes=N vla/train_vla.py ...` 启动时，会拉起 N 个
+    # 进程做分布式数据并行（DDP）：每个进程各绑定一张 GPU、各持一份完整模型副本，
+    # 反向传播时自动对各卡梯度做 all-reduce 同步，使参数始终保持一致。
+    #   - mixed_precision：由 cfg.policy.use_amp 决定，开启即用 bfloat16 混合精度。
+    #   - find_unused_parameters=True：允许前向中存在未参与计算的参数（pi0 的部分
+    #     子模块在某些配置下不参与反向），避免 DDP 因“有参数没收到梯度”而报错；
+    #     若确认没有未用参数，可改为 False 略微提速。
+    ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
+    accelerator = Accelerator(
+        mixed_precision="bf16" if cfg.policy.use_amp else "no",
+        kwargs_handlers=[ddp_kwargs],
+    )
+    device = accelerator.device
+
+    # 仅主进程打印完整配置，避免多卡下每个进程各刷一遍日志。
+    if accelerator.is_main_process:
+        logging.info(pformat(cfg.to_dict()))  # 打印最终生效的完整配置，便于复现
 
     # wandb（Weights & Biases）是一个在线实验跟踪平台，可把训练过程中的 loss、
     # 学习率、评估成功率、视频等实时上传到网页看板，方便可视化和对比实验。
-    # 仅当配置里启用且填了 project 时才创建 logger，否则日志只保存在本地。
-    if cfg.wandb.enable and cfg.wandb.project:
+    # 只在主进程创建与上传，否则多个进程会向同一次实验记录重复写入。
+    if accelerator.is_main_process and cfg.wandb.enable and cfg.wandb.project:
         wandb_logger = WandBLogger(cfg)
     else:
         wandb_logger = None
-        logging.info(colored("Logs will be saved locally.", "yellow", attrs=["bold"]))
+        if accelerator.is_main_process:
+            logging.info(colored("Logs will be saved locally.", "yellow", attrs=["bold"]))
 
     # 设置随机种子，让数据打乱、参数初始化等随机过程可复现（同样的种子 → 同样的结果）。
     if cfg.seed is not None:
         set_seed(cfg.seed)
 
-    # 检查设备是否可用
-    device = get_safe_torch_device(cfg.policy.device, log=True)
     torch.backends.cudnn.benchmark = True
     torch.backends.cuda.matmul.allow_tf32 = True
 
@@ -254,8 +254,7 @@ def train(cfg: TrainPipelineConfig):
     #     学习率即每一步参数更新的"步幅大小"。
     logging.info("Creating optimizer and scheduler")
     optimizer, lr_scheduler = make_optimizer_and_scheduler(cfg, policy)
-    # 混合精度训练用的梯度缩放器（详见 update_policy 内注释）；use_amp 为 False 时它不生效。
-    grad_scaler = GradScaler(device.type, enabled=cfg.policy.use_amp)
+    # 混合精度训练的梯度缩放已交由 accelerator 统一接管，这里不再单独创建 GradScaler。
 
     step = 0  # 已经完成的策略更新次数（每次 = 一轮前向 + 反向 + 优化）
 
@@ -301,6 +300,11 @@ def train(cfg: TrainPipelineConfig):
         pin_memory=device.type != "cpu",  # 锁页内存，加快数据从 CPU 拷到 GPU 的速度
         drop_last=False,
     )
+
+    # 用 Accelerate 包装策略、优化器与数据加载器：多卡（DDP）下各卡各持一份完整模型、
+    # 反向时自动做梯度全归约，并把数据在各进程间分片；取出的 batch 会自动搬到本进程 GPU。
+    # lr_scheduler 不交给 accelerator，保持按训练步手动 step，使学习率曲线与单卡口径一致。
+    policy, optimizer, dataloader = accelerator.prepare(policy, optimizer, dataloader)
     # cycle(...) 把 dataloader 包成"无限循环"的迭代器：遍历完整个数据集后会自动
     # 从头再来，这样主循环就能一直按 step 取数据，而不必关心 epoch 边界。
     dl_iter = cycle(dataloader)
@@ -344,9 +348,8 @@ def train(cfg: TrainPipelineConfig):
             batch,
             optimizer,
             cfg.optimizer.grad_clip_norm,
-            grad_scaler=grad_scaler,
+            accelerator,
             lr_scheduler=lr_scheduler,
-            use_amp=cfg.policy.use_amp,
         )
 
         # 注意：评估和保存检查点发生在第 `step` 次训练更新完成*之后*，因此在这里
@@ -359,7 +362,8 @@ def train(cfg: TrainPipelineConfig):
         is_eval_step = cfg.eval_freq > 0 and step % cfg.eval_freq == 0
 
         # —— 记录日志：打印到控制台，并（若启用）上传到 wandb 看板 ——
-        if is_log_step:
+        # 多卡下只由主进程打印与上传，避免每个进程各记一遍。
+        if is_log_step and accelerator.is_main_process:
             logging.info(train_tracker)
             if wandb_logger:
                 wandb_log_dict = train_tracker.to_dict()
@@ -372,17 +376,26 @@ def train(cfg: TrainPipelineConfig):
         # 检查点就是把"当前训练进度"完整存盘：模型权重 + 优化器/调度器状态 + 步数 + 配置。
         # 有了它，既能随时拿出来部署/推理，也能在中断后从这里断点续训（配合 cfg.resume）。
         if cfg.save_checkpoint and is_saving_step:
-            logging.info(f"Checkpoint policy after step {step}")
-            checkpoint_dir = get_step_checkpoint_dir(cfg.output_dir, cfg.steps, step)
-            save_checkpoint(checkpoint_dir, step, cfg, policy, optimizer, lr_scheduler)
-            update_last_checkpoint(checkpoint_dir)  # 更新指向"最新检查点"的快捷链接
-            if wandb_logger:
-                wandb_logger.log_policy(checkpoint_dir)
+            # 先让所有进程在此对齐（等各卡都跑完这一步），再由主进程统一存盘。
+            accelerator.wait_for_everyone()
+            if accelerator.is_main_process:
+                logging.info(f"Checkpoint policy after step {step}")
+                checkpoint_dir = get_step_checkpoint_dir(cfg.output_dir, cfg.steps, step)
+                # unwrap_model 从 DDP 包装里取回原始 pi0 策略再保存，使检查点与单卡
+                # 训练产出的格式完全一致（可直接用于部署或断点续训）。
+                save_checkpoint(
+                    checkpoint_dir, step, cfg,
+                    accelerator.unwrap_model(policy), optimizer, lr_scheduler,
+                )
+                update_last_checkpoint(checkpoint_dir)  # 更新指向"最新检查点"的快捷链接
+                if wandb_logger:
+                    wandb_logger.log_policy(checkpoint_dir)
 
         # —— 可选评估：仅当配置了仿真环境 cfg.env 时才做 ——
         # 在仿真里让当前策略实际跑若干个 episode，统计平均回报、成功率，并录制视频，
         # 从而直观衡量"训练到现在策略到底好不好用"（而不仅看 loss 数值）。
-        if cfg.env and is_eval_step:
+        # 多卡下评估仅由主进程执行；如需严格的多卡评估请改用独立的 eval 脚本。
+        if cfg.env and is_eval_step and accelerator.is_main_process:
             step_id = get_step_identifier(step, cfg.steps)
             logging.info(f"Eval policy at step {step}")
             # 评估时用 torch.no_grad() 关闭梯度计算（只前向、不训练，省显存更快）；
@@ -393,7 +406,7 @@ def train(cfg: TrainPipelineConfig):
             ):
                 eval_info = eval_policy(
                     eval_env,
-                    policy,
+                    accelerator.unwrap_model(policy),
                     cfg.eval.n_episodes,
                     videos_dir=cfg.output_dir / "eval" / f"videos_step_{step_id}",
                     max_episodes_rendered=4,
@@ -419,13 +432,16 @@ def train(cfg: TrainPipelineConfig):
 
     if eval_env:
         eval_env.close()  # 关闭仿真环境，释放资源
-    logging.info("End of training")
+    if accelerator.is_main_process:
+        logging.info("End of training")
 
 
 if __name__ == "__main__":
     init_logging()  # 初始化日志格式
     # 调用 train()，但实参 cfg 由 @parser.wrap() 从命令行 --config_path 自动解析注入，
-    # 因此这里不需要、也不能手动传参。运行示例：
+    # 因此这里不需要、也不能手动传参。
+    # 单卡运行：
     #   python vla/train_vla.py --config_path=config/vla/pi0_franka.yaml
-    #   python vla/train_vla.py --config_path=config/vla/smolvla_franka.yaml
+    # 多卡运行（N=参与训练的 GPU 数量，分布式数据并行 DDP）：
+    #   accelerate launch --num_processes=N vla/train_vla.py --config_path=config/vla/pi0_franka.yaml
     train()
