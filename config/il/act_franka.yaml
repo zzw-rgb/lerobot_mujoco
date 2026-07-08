@@ -23,6 +23,8 @@ save_freq: 10_000
 use_policy_training_preset: true
 
 wandb:
-  enable: false
+  enable: true
   project: act_franka
+  entity: null
+  mode: online
   disable_artifact: true

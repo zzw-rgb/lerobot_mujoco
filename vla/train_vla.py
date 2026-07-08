@@ -198,6 +198,10 @@ def train(cfg: TrainPipelineConfig):
         kwargs_handlers=[ddp_kwargs],
     )
     device = accelerator.device
+    # DDP：把本进程分到的设备写回配置，让 make_policy 按各自的 local_rank 把模型
+    # 加载到对应 GPU（rank0→cuda:0、rank1→cuda:1…）；否则所有进程都会按
+    # cfg.policy.device（默认 cuda:0）把模型挤到 0 号卡，导致 0 号卡 OOM。
+    cfg.policy.device = str(accelerator.device)
 
     # 仅主进程打印完整配置，避免多卡下每个进程各刷一遍日志。
     if accelerator.is_main_process:
@@ -383,10 +387,25 @@ def train(cfg: TrainPipelineConfig):
                 checkpoint_dir = get_step_checkpoint_dir(cfg.output_dir, cfg.steps, step)
                 # unwrap_model 从 DDP 包装里取回原始 pi0 策略再保存，使检查点与单卡
                 # 训练产出的格式完全一致（可直接用于部署或断点续训）。
-                save_checkpoint(
-                    checkpoint_dir, step, cfg,
-                    accelerator.unwrap_model(policy), optimizer, lr_scheduler,
-                )
+                unwrapped_policy = accelerator.unwrap_model(policy)
+                # 存盘前把 device 从带索引的 "cuda:N"（DDP 下各进程各不相同）规整为通用的
+                # "cuda"：否则 checkpoint 的 config.json 会写入 "cuda:0" 这类带索引的值，部署时
+                # lerobot 用 draccus 重新解析会因不认带索引的 device 而实例化失败。存完立即恢复，
+                # 训练过程不受影响。
+                _saved_pol_dev = unwrapped_policy.config.device
+                _saved_cfg_dev = cfg.policy.device
+                if str(_saved_pol_dev).startswith("cuda"):
+                    unwrapped_policy.config.device = "cuda"
+                if str(_saved_cfg_dev).startswith("cuda"):
+                    cfg.policy.device = "cuda"
+                try:
+                    save_checkpoint(
+                        checkpoint_dir, step, cfg,
+                        unwrapped_policy, optimizer, lr_scheduler,
+                    )
+                finally:
+                    unwrapped_policy.config.device = _saved_pol_dev
+                    cfg.policy.device = _saved_cfg_dev
                 update_last_checkpoint(checkpoint_dir)  # 更新指向"最新检查点"的快捷链接
                 if wandb_logger:
                     wandb_logger.log_policy(checkpoint_dir)

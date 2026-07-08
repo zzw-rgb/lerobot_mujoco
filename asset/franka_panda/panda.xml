@@ -278,9 +278,10 @@
     <general class="panda" name="actuator6" joint="joint6" gainprm="2000" biasprm="0 -2000 -200" forcerange="-12 12"
       ctrlrange="-0.0175 3.7525"/>
     <general class="panda" name="actuator7" joint="joint7" gainprm="2000" biasprm="0 -2000 -200" forcerange="-12 12"/>
-    <!-- 将 0~255 映射到 0~0.04 m：gain = kp * 0.04 / 255。采用 Panda 原始夹爪的 kp=350。 -->
-    <general class="panda" name="actuator8" tendon="split" forcerange="-200 200" ctrlrange="0 255"
-      gainprm="0.05490196078 0 0" biasprm="0 -350 -10"/>
+    <!-- 将 0~255 映射到 0~0.04 m：gain = kp * 0.04 / 255。夹爪刚度 kp=1000、阻尼 kv=20
+         （增大夹持力，避免夹到物体后被接触反力顶开；gain 需随 kp 同比例改，否则 0~255 映射会错位）。 -->
+    <general class="panda" name="actuator8" tendon="split" forcerange="-300 300" ctrlrange="0 255"
+      gainprm="0.15686274509 0 0" biasprm="0 -1000 -20"/>
   </actuator>
 
   <!-- EICode: 已移除原 keyframe(home)。合成场景里加入了桌面物体(自由关节), 全模型 nq 变大,

@@ -82,7 +82,7 @@ SEED = None
 
 # ---- 数据集相关的基本配置 ----
 REPO_NAME = 'franka_pnp'               # 数据集名字（repo_id），起个标识用，franka 是机械臂型号、pnp=pick and place 抓放
-NUM_DEMO = 50 # 要采集的示教数据数量
+NUM_DEMO = 100 # 要采集的示教数据数量
 ROOT = "./demo_data" # 保存示教数据的根目录（数据最终存到当前目录下的 demo_data 文件夹）
 
 # 任务的文字描述。注意：这个字符串会被一起存进数据集，训练时模型也会读到它，

@@ -24,5 +24,6 @@ use_policy_training_preset: true # 使用策略自带的训练预设（优化器
 wandb:
   enable: true             # 是否启用 Weights & Biases 日志
   project: smolvla_franka
-  entity: <你的wandb账户名>   # 改成你自己的 wandb 账户名
+  entity: null
+  mode: online
   disable_artifact: true
