@@ -6,7 +6,7 @@
     python il/deploy_il.py --config_path=config/il/act_franka.yaml
     python il/deploy_il.py --config_path=config/il/diffusion_franka.yaml
     CUDA_VISIBLE_DEVICES=7 python il/deploy_il.py --config_path=config/il/act_franka.yaml --headless --max_steps=2000 --video=./outputs/act.mp4
-
+    CUDA_VISIBLE_DEVICES=7 python il/deploy_il.py --config_path=config/il/diffusion_franka.yaml --headless --max_steps=2000 --video=./outputs/dp.mp4
 脚本会从 ``output_dir/checkpoints/last/pretrained_model`` 加载最新检查点，
 并根据检查点中的 ``input_features`` 自动决定使用主相机、腕部相机
 和末端位姿，不再在部署脚本里重复手写模型配置。

@@ -28,6 +28,7 @@ import os
 import re
 import shutil
 import sys
+import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -83,12 +84,27 @@ AUTO_RENDER_WIDTH = 400
 AUTO_RENDER_HEIGHT = 300
 AUTO_IMAGE_WRITER_THREADS = 2      # 长时间采集更稳；想更快可改 4/8，但更吃内存
 
+# 数据质量保护。
+# 续采时如果发现尾部 episode 的 parquet 只有几十 KB，通常说明相机返回了黑图；
+# 脚本会自动裁掉这段坏尾巴，再从最后一条正常 episode 继续采集。
+AUTO_REPAIR_INVALID_TAIL = True
+AUTO_MIN_EPISODE_BYTES = 1_000_000
+AUTO_MIN_EPISODE_BYTES_PER_FRAME = 100_000
+AUTO_MIN_IMAGE_BYTES = 1_000
+AUTO_IMAGE_VALIDATION_SAMPLES = 16
+AUTO_MIN_IMAGE_STD = 10.0  # 收紧黑图判定：原 2.0 太松，大面积黑图 std 略>2 会漏过
+# 近黑像素占比阈值：一帧里像素 < AUTO_NEAR_BLACK_VALUE 的比例超过 AUTO_MAX_NEAR_BLACK_RATIO 即判坏图
+AUTO_NEAR_BLACK_VALUE = 10
+AUTO_MAX_NEAR_BLACK_RATIO = 0.5
+# 熔断：连续这么多次因黑图失败就立即停止（窗口失活/渲染坏时避免白跑一长串坏 episode）
+AUTO_MAX_CONSECUTIVE_BLACK = 3
+
 # 专家轨迹参数：抓不住主要调这几个。
 AUTO_GRASP_X_OFFSET = 0.0        # 抓取点相对杯子中心的 x 偏移；方向反了就改成 -0.060
-AUTO_GRASP_Y_OFFSET = 0.060          # 抓取点相对杯子中心的 y 偏移；这个场景通常保持 0
-AUTO_GRASP_Z_OFFSET = 0.012        # 下探高度；还高就试 0.0，太低碰撞就试 0.02
-AUTO_PLACE_Z_OFFSET = 0.08         # 放到盘子上方的高度
-AUTO_HOVER_Z = 1.05                # 搬运时抬起高度
+AUTO_GRASP_Y_OFFSET = 0.050      # 抓取点相对杯子中心的 y 偏移；这个场景通常保持 0
+AUTO_GRASP_Z_OFFSET = 0.022      # 下探高度；还高就试 0.0，太低碰撞就试 0.02
+AUTO_PLACE_Z_OFFSET = 0.065      # 放到盘子上方的高度
+AUTO_HOVER_Z = 1.05              # 搬运时抬起高度
 
 # VLA 可选固定指令。None 表示随机红杯/蓝杯。
 # 可写："Place the red mug on the plate." 或 "Place the blue mug on the plate."
@@ -172,7 +188,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--grasp_xy_offset", type=float, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--grasp_direction", default=None, help=argparse.SUPPRESS)
     parser.add_argument("--place_z_offset", type=float, default=AUTO_PLACE_Z_OFFSET, help="TCP z offset relative to plate body center while placing.")
-    parser.add_argument("--close_frames", type=int, default=28, help="Frames to keep gripper closed before lifting.")
+    parser.add_argument("--close_frames", type=int, default=25, help="Frames to keep gripper closed before lifting.")
     parser.add_argument("--open_frames", type=int, default=22, help="Frames to keep gripper open after placing.")
     parser.add_argument("--settle_frames", type=int, default=60, help="Frames to wait after final lift for success check.")
     parser.add_argument("--max_waypoint_frames", type=int, default=180, help="Safety cap per waypoint.")
@@ -225,6 +241,237 @@ def count_meta_episodes(root: Path) -> int:
         return sum(1 for line in file if line.strip())
 
 
+def read_jsonl(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    records = []
+    with path.open("r", encoding="utf-8") as file:
+        for line in file:
+            line = line.strip()
+            if line:
+                records.append(json.loads(line))
+    return records
+
+
+def write_jsonl(path: Path, records: list[dict]) -> None:
+    with path.open("w", encoding="utf-8") as file:
+        for record in records:
+            file.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def load_dataset_info(root: Path) -> dict:
+    info_path = root / "meta" / "info.json"
+    if not info_path.exists():
+        return {}
+    with info_path.open("r", encoding="utf-8") as file:
+        return json.load(file)
+
+
+def episode_parquet_path(root: Path, episode_index: int, info: dict | None = None) -> Path:
+    info = info or load_dataset_info(root)
+    chunks_size = int(info.get("chunks_size", 1000))
+    data_path = info.get("data_path", "data/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.parquet")
+    return root / data_path.format(
+        episode_chunk=episode_index // chunks_size,
+        episode_index=episode_index,
+    )
+
+
+def sampled_indices(length: int, samples: int) -> list[int]:
+    if length <= 0:
+        return []
+    if length <= samples:
+        return list(range(length))
+    if samples <= 1:
+        return [0]
+    return sorted({round(i * (length - 1) / (samples - 1)) for i in range(samples)})
+
+
+def is_episode_file_complete(root: Path, episode_index: int, min_bytes: int = AUTO_MIN_EPISODE_BYTES) -> bool:
+    path = episode_parquet_path(root, episode_index)
+    if not path.exists():
+        return False
+
+    try:
+        import pyarrow.parquet as pq
+
+        rows = pq.read_metadata(path).num_rows
+        if rows <= 0:
+            return False
+
+        # Normal embedded-image episodes in this scene are tens of MB. Black
+        # frames compress to ~270 bytes each, so even a half-black episode has a
+        # much lower bytes/frame ratio. This catches bad episodes quickly
+        # without reading every image blob.
+        bytes_per_frame = path.stat().st_size / rows
+        if path.stat().st_size < min_bytes or bytes_per_frame < AUTO_MIN_EPISODE_BYTES_PER_FRAME:
+            return False
+        return True
+    except Exception:
+        return path.stat().st_size >= min_bytes
+
+
+def truncate_dataset_tail(root: Path, keep_episodes: int) -> None:
+    """Drop episode files and metadata from keep_episodes onward.
+
+    This is used only for repairing a bad tail produced by a failed/black-camera
+    append run. Good earlier episodes are left untouched.
+    """
+    meta_dir = root / "meta"
+    episodes_path = meta_dir / "episodes.jsonl"
+    stats_path = meta_dir / "episodes_stats.jsonl"
+    info_path = meta_dir / "info.json"
+
+    episodes = read_jsonl(episodes_path)
+    kept_episodes = [ep for ep in episodes if int(ep.get("episode_index", -1)) < keep_episodes]
+    write_jsonl(episodes_path, kept_episodes)
+
+    stats = read_jsonl(stats_path)
+    if stats:
+        kept_stats = [item for item in stats if int(item.get("episode_index", -1)) < keep_episodes]
+        write_jsonl(stats_path, kept_stats)
+
+    info = load_dataset_info(root)
+    if info:
+        total_episodes = len(kept_episodes)
+        total_frames = sum(int(ep.get("length", 0)) for ep in kept_episodes)
+        info["total_episodes"] = total_episodes
+        info["total_frames"] = total_frames
+        if "splits" in info:
+            info["splits"]["train"] = f"0:{total_episodes}"
+        with info_path.open("w", encoding="utf-8") as file:
+            json.dump(info, file, ensure_ascii=False, indent=4)
+
+    cleanup_orphan_episode_files(root, keep_episodes)
+
+
+def repair_invalid_tail(root: Path) -> int:
+    """Repair invalid episodes before appending.
+
+    If all invalid episodes are at the tail, trimming is enough. If invalid
+    episodes are mixed into the middle, build a compact copy that keeps all good
+    episodes and reindexes them contiguously.
+    """
+    episodes = read_jsonl(root / "meta" / "episodes.jsonl")
+    if not episodes:
+        return 0
+
+    bad_indices: list[int] = []
+    valid_records: list[dict] = []
+    for episode in episodes:
+        episode_index = int(episode["episode_index"])
+        if is_episode_file_complete(root, episode_index):
+            valid_records.append(episode)
+        else:
+            bad_indices.append(episode_index)
+
+    if not bad_indices:
+        return len(episodes)
+
+    first_bad = bad_indices[0]
+    has_good_after_first_bad = any(int(ep["episode_index"]) > first_bad for ep in valid_records)
+
+    if not has_good_after_first_bad:
+        print(
+            f"检测到 episode_{first_bad:06d} 之后存在异常/黑图 parquet，"
+            f"将裁掉坏尾巴并从 {first_bad} 继续采集。"
+        )
+        truncate_dataset_tail(root, first_bad)
+        return count_meta_episodes(root)
+
+    print(
+        f"检测到 {len(bad_indices)} 个黑图/异常 episode，且坏数据混在中间；"
+        "将保留所有好 episode 并重新连续编号。"
+    )
+    compact_valid_dataset(root, valid_records, bad_indices)
+    return count_meta_episodes(root)
+
+
+def replace_arrow_column(table, name: str, values):
+    import pyarrow as pa
+
+    column_index = table.schema.get_field_index(name)
+    if column_index < 0:
+        return table
+    field = table.schema.field(column_index)
+    return table.set_column(column_index, field, pa.array(values, type=field.type))
+
+
+def compact_valid_dataset(root: Path, valid_records: list[dict], bad_indices: list[int]) -> None:
+    """Create a clean dataset containing only valid episodes, then swap it in."""
+    import pyarrow.parquet as pq
+
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    tmp_root = root.with_name(f"{root.name}_repair_tmp_{timestamp}")
+    backup_root = root.with_name(f"{root.name}_bad_backup_{timestamp}")
+    if tmp_root.exists():
+        shutil.rmtree(tmp_root)
+    if backup_root.exists():
+        shutil.rmtree(backup_root)
+
+    info = load_dataset_info(root)
+    stats_by_index = {
+        int(item["episode_index"]): item
+        for item in read_jsonl(root / "meta" / "episodes_stats.jsonl")
+        if "episode_index" in item
+    }
+
+    (tmp_root / "data").mkdir(parents=True, exist_ok=True)
+    (tmp_root / "meta").mkdir(parents=True, exist_ok=True)
+    tasks_path = root / "meta" / "tasks.jsonl"
+    if tasks_path.exists():
+        shutil.copy2(tasks_path, tmp_root / "meta" / "tasks.jsonl")
+
+    new_episodes: list[dict] = []
+    new_stats: list[dict] = []
+    global_frame_index = 0
+
+    for new_episode_index, old_episode in enumerate(valid_records):
+        old_episode_index = int(old_episode["episode_index"])
+        old_path = episode_parquet_path(root, old_episode_index, info)
+        table = pq.ParquetFile(old_path).read()
+        frame_count = table.num_rows
+
+        table = replace_arrow_column(table, "frame_index", list(range(frame_count)))
+        table = replace_arrow_column(table, "episode_index", [new_episode_index] * frame_count)
+        table = replace_arrow_column(table, "index", list(range(global_frame_index, global_frame_index + frame_count)))
+
+        new_path = episode_parquet_path(tmp_root, new_episode_index, info)
+        new_path.parent.mkdir(parents=True, exist_ok=True)
+        pq.write_table(table, new_path)
+
+        new_episodes.append(
+            {
+                "episode_index": new_episode_index,
+                "tasks": old_episode.get("tasks", []),
+                "length": frame_count,
+            }
+        )
+        old_stats = stats_by_index.get(old_episode_index)
+        if old_stats is not None:
+            copied_stats = json.loads(json.dumps(old_stats))
+            copied_stats["episode_index"] = new_episode_index
+            new_stats.append(copied_stats)
+        global_frame_index += frame_count
+
+    write_jsonl(tmp_root / "meta" / "episodes.jsonl", new_episodes)
+    if new_stats:
+        write_jsonl(tmp_root / "meta" / "episodes_stats.jsonl", new_stats)
+
+    info["total_episodes"] = len(new_episodes)
+    info["total_frames"] = global_frame_index
+    if "splits" in info:
+        info["splits"]["train"] = f"0:{len(new_episodes)}"
+    with (tmp_root / "meta" / "info.json").open("w", encoding="utf-8") as file:
+        json.dump(info, file, ensure_ascii=False, indent=4)
+
+    shutil.move(str(root), str(backup_root))
+    shutil.move(str(tmp_root), str(root))
+    print(f"已备份原数据集到：{backup_root}")
+    print(f"已剔除坏 episode：{bad_indices}")
+    print(f"保留好 episode：{len(new_episodes)} 条")
+
+
 def cleanup_orphan_episode_files(root: Path, valid_episodes: int) -> None:
     """Remove episode files written after metadata failed to update.
 
@@ -257,6 +504,20 @@ def resize_image(image: np.ndarray, size: int = 256) -> np.ndarray:
     return np.asarray(Image.fromarray(image).resize((size, size)))
 
 
+def validate_camera_image(image: np.ndarray, camera_name: str) -> None:
+    array = np.asarray(image)
+    if array.ndim != 3 or array.shape[-1] != 3:
+        raise RuntimeError(f"{camera_name} image has invalid shape: {array.shape}")
+    image_std = float(array.std())
+    near_black_ratio = float((array < AUTO_NEAR_BLACK_VALUE).mean())
+    if image_std < AUTO_MIN_IMAGE_STD or near_black_ratio > AUTO_MAX_NEAR_BLACK_RATIO:
+        raise RuntimeError(
+            f"{camera_name} image looks invalid/black: std={image_std:.3f}, "
+            f"near_black_ratio={near_black_ratio:.2f}. "
+            "Please restart the MuJoCo viewer or switch GL backend/headless mode."
+        )
+
+
 def create_or_load_dataset(args: argparse.Namespace) -> LeRobotDataset:
     from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
 
@@ -283,7 +544,10 @@ def create_or_load_dataset(args: argparse.Namespace) -> LeRobotDataset:
         elif action == "append":
             print(f"继续采集，不覆盖旧数据：{root}")
             args.dataset_action = "append"
-            cleanup_orphan_episode_files(root, count_meta_episodes(root))
+            valid_episodes = count_meta_episodes(root)
+            if AUTO_REPAIR_INVALID_TAIL:
+                valid_episodes = repair_invalid_tail(root)
+            cleanup_orphan_episode_files(root, valid_episodes)
             return LeRobotDataset(repo_id, root=root)
 
     if args.mode == "il":
@@ -456,6 +720,8 @@ def record_frame(
     saved_count: int = 0,
 ) -> int:
     agent_image, wrist_image = env.grab_image()
+    validate_camera_image(agent_image, "agent camera")
+    validate_camera_image(wrist_image, "wrist camera")
     agent_256 = resize_image(agent_image)
     wrist_256 = resize_image(wrist_image)
 
@@ -788,9 +1054,16 @@ def main() -> None:
     print(f"Physics steps per frame: {physics_steps}")
     print(f"Headless: {args.headless}")
 
+    if not args.headless:
+        print(
+            "注意：非 headless 采集时相机图从窗口帧缓冲读回，采集期间若窗口被遮挡/"
+            "最小化/锁屏/息屏会导致后续全部黑图；长时间无人值守采集强烈建议加 --headless。"
+        )
+
     results: list[AttemptResult] = []
     saved = existing_episodes
     attempt_start = existing_episodes if existing_episodes else 0
+    consecutive_black = 0  # 连续黑图失败计数，用于熔断
     try:
         for attempt in range(attempt_start, attempt_start + max_attempts):
             if saved >= args.num_demos:
@@ -814,10 +1087,28 @@ def main() -> None:
 
             if result.success:
                 saved += 1
+                consecutive_black = 0
                 print(f"✓ saved {saved}/{args.num_demos} | seed={seed} | frames={result.frames} | task={result.task}")
             else:
                 print(f"× failed attempt={attempt} | seed={seed} | frames={result.frames} | reason={result.reason}")
+                # 熔断：连续多次因黑图/无效相机图失败，通常是窗口失活或渲染后端坏了，
+                # 再跑下去只会攒一长串坏数据，直接停下报警。
+                if result.reason and "invalid/black" in result.reason:
+                    consecutive_black += 1
+                    if consecutive_black >= AUTO_MAX_CONSECUTIVE_BLACK:
+                        print(
+                            f"熔断：已连续 {consecutive_black} 次相机黑图，停止采集。"
+                            "请检查 MuJoCo 窗口是否被遮挡/最小化/锁屏，或改用 --headless 重新采集。"
+                        )
+                        break
+                else:
+                    consecutive_black = 0
             gc.collect()
+            try:
+                import ctypes
+                ctypes.CDLL("libc.so.6").malloc_trim(0)  # Linux 上把 free 的堆还给 OS，压制 RSS 增长
+            except Exception:
+                pass  # 非 Linux/无 libc 时忽略
     finally:
         if hasattr(env, "close"):
             env.close()

@@ -123,6 +123,9 @@ class SimpleEnv2:
         self.last_q = copy.deepcopy(q_zero)
         self.q = np.concatenate([q_zero, np.array([255.0])])  # 底层 MuJoCo 控制量：255=张开
         self.gripper_command = 0.0  # 对外统一语义：0=张开，1=闭合
+        self.gripper_latched = False  # 闭合锁存：夹住后持续给满闭合力，避免策略抖动造成回弹
+        self.gripper_close_threshold = 0.75
+        self.gripper_open_threshold = 0.25
         self.p0, self.R0 = self.env.get_pR_body(body_name='tcp_link')
         mug_red_init_pose, mug_blue_init_pose, plate_init_pose = self.get_obj_pose()
         self.obj_init_pose = np.concatenate([mug_red_init_pose, mug_blue_init_pose, plate_init_pose],dtype=np.float32)
@@ -200,7 +203,14 @@ class SimpleEnv2:
             raise ValueError('action_type not recognized')
         
         # 策略/数据集始终使用 0=张开、1=闭合；只在这里转成 MuJoCo 的 255~0。
-        self.gripper_command = float(np.clip(action[-1], 0.0, 1.0))
+        # 夹爪加入 hysteresis/锁存：只要明显闭合过，就保持满闭合力；
+        # 只有动作明确小于 open_threshold 才松开，避免模型输出 0.8/1.0 抖动时把杯子弹掉。
+        raw_gripper_command = float(np.clip(action[-1], 0.0, 1.0))
+        if raw_gripper_command >= self.gripper_close_threshold:
+            self.gripper_latched = True
+        elif raw_gripper_command <= self.gripper_open_threshold:
+            self.gripper_latched = False
+        self.gripper_command = 1.0 if self.gripper_latched else raw_gripper_command
         gripper_ctrl = np.array([255.0 * (1.0 - self.gripper_command)])
         self.compute_q = q
         q = np.concatenate([q, gripper_ctrl])
