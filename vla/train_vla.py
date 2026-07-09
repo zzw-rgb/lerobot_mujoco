@@ -25,12 +25,19 @@
 事情就是：用一批已经录好的示教数据（dataset），通过反复"看数据-预测-纠错"的
 方式，把这个网络训练好。
 
-运行方式（在配置文件里写好所有超参数，然后用 --config_path 指定它）：
+运行命令（在配置文件里写好所有超参数，然后用 --config_path 指定它）：
 
-    # 单卡
+    # π0 单卡
     python vla/train_vla.py --config_path=config/vla/pi0_franka.yaml
-    # 多卡（N=参与训练的 GPU 数量，分布式数据并行 DDP）
-    accelerate launch --num_processes=N vla/train_vla.py --config_path=config/vla/pi0_franka.yaml
+
+    # π0 多卡（例：3 张卡）
+    CUDA_VISIBLE_DEVICES=2,3,4 accelerate launch --num_processes=3 --main_process_port=29501 vla/train_vla.py --config_path=config/vla/pi0_franka.yaml
+
+    # SmolVLA 单卡
+    python vla/train_vla.py --config_path=config/vla/smolvla_franka.yaml
+
+    # SmolVLA 多卡（例：3 张卡）
+    CUDA_VISIBLE_DEVICES=5,6,7 accelerate launch --num_processes=3 --main_process_port=29502 vla/train_vla.py --config_path=config/vla/smolvla_franka.yaml
 
 整体流程概览：
     1. 读取 yaml 配置 → 构造 cfg（由 @parser.wrap() 自动完成，见 train 函数说明）

@@ -21,6 +21,44 @@ cd /path/to/lerobot_mujoco
 
 然后从下面两条路线中选择一条。**同一次实验只需选择一种模型配置，不需要把四种模型全部训练一遍。**
 
+### 四个模型常用命令速查
+
+ACT：
+
+```bash
+python il/train_il.py --config_path=config/il/act_franka.yaml
+python il/deploy_il.py --config_path=config/il/act_franka.yaml
+CUDA_VISIBLE_DEVICES=7 python il/deploy_il.py --config_path=config/il/act_franka.yaml --checkpoint=./ckpt/act_franka/checkpoints/020000/pretrained_model --device=cuda --seed=0 --max_steps=2000 --headless
+```
+
+Diffusion Policy：
+
+```bash
+python il/train_il.py --config_path=config/il/diffusion_franka.yaml
+python il/deploy_il.py --config_path=config/il/diffusion_franka.yaml
+CUDA_VISIBLE_DEVICES=7 python il/deploy_il.py --config_path=config/il/diffusion_franka.yaml --checkpoint=./ckpt/diffusion_franka/checkpoints/020000/pretrained_model --device=cuda --seed=0 --max_steps=2000 --headless
+```
+
+π0：
+
+```bash
+python vla/train_vla.py --config_path=config/vla/pi0_franka.yaml
+CUDA_VISIBLE_DEVICES=2,3,4 accelerate launch --num_processes=3 --main_process_port=29501 vla/train_vla.py --config_path=config/vla/pi0_franka.yaml
+python vla/deploy_vla.py --config_path=config/vla/pi0_franka.yaml
+CUDA_VISIBLE_DEVICES=7 python vla/deploy_vla.py --config_path=config/vla/pi0_franka.yaml --checkpoint=./ckpt/pi0_franka/checkpoints/020000/pretrained_model --device=cuda --seed=0 --max_steps=2000 --headless
+```
+
+SmolVLA：
+
+```bash
+python vla/train_vla.py --config_path=config/vla/smolvla_franka.yaml
+CUDA_VISIBLE_DEVICES=5,6,7 accelerate launch --num_processes=3 --main_process_port=29502 vla/train_vla.py --config_path=config/vla/smolvla_franka.yaml
+python vla/deploy_vla.py --config_path=config/vla/smolvla_franka.yaml
+CUDA_VISIBLE_DEVICES=7 python vla/deploy_vla.py --config_path=config/vla/smolvla_franka.yaml --checkpoint=./ckpt/smolvla_franka/checkpoints/020000/pretrained_model --device=cuda --seed=0 --max_steps=2000 --headless
+```
+
+无头部署不写 `--video` 时会自动按模型保存到 `output/act/`、`output/diffusion/`、`output/pi0/` 或 `output/smolvla/`。
+
 ### 路线 A：IL 模仿学习（推荐先跑通）
 
 ```bash
@@ -279,7 +317,7 @@ cd ~/all_users/z_work/lerobot_mujoco && git pull --ff-only origin main
 cd ~/all_users/z_work/lerobot_mujoco && git stash push -u -m "linux-backup-before-update" && git pull --ff-only origin main
 ```
 
-可以用 `git stash list` 查看备份；只有确实需要恢复服务器旧修改时才运行 `git stash pop`。`demo_data`、`ckpt` 和 `outputs` 已被 `.gitignore` 忽略，拉取代码不会覆盖数据集、检查点或视频。
+可以用 `git stash list` 查看备份；只有确实需要恢复服务器旧修改时才运行 `git stash pop`。`demo_data`、`ckpt`、`output` 和 `outputs` 已被 `.gitignore` 忽略，拉取代码不会覆盖数据集、检查点或视频。
 
 本次新增了 OpenCV 视频写入依赖，Linux 更新代码后安装一次：
 
@@ -582,10 +620,10 @@ python il/deploy_il.py --config_path=config/il/diffusion_franka.yaml
 无桌面 Linux 服务器可直接离屏运行并保存 MP4（MP3 只能保存音频，不能保存画面）：
 
 ```bash
-CUDA_VISIBLE_DEVICES=7 python il/deploy_il.py --config_path=config/il/act_franka.yaml --checkpoint=./ckpt/act_franka/checkpoints/020000/pretrained_model --device=cuda --seed=0 --max_steps=2000 --headless --video=./outputs/act_seed0.mp4
+CUDA_VISIBLE_DEVICES=7 python il/deploy_il.py --config_path=config/il/act_franka.yaml --checkpoint=./ckpt/act_franka/checkpoints/020000/pretrained_model --device=cuda --seed=0 --max_steps=2000 --headless
 ```
 
-无头模式不会创建 GLFW 窗口，默认以 `400×300` 分辨率分别渲染主相机和腕部相机，再横向合成为视频。`--max_steps` 在无头模式下必须大于 0；视频按 `--control_hz`（默认 20 FPS）写入。首轮成功后，脚本默认自动测试 10 个不重复随机种子，每个种子保存独立 MP4，并生成 `outputs/act_summary.json` 成功率汇总。添加 `--random_seeds=0` 可只跑首轮；需要降低渲染开销时可添加 `--render_width=320 --render_height=240`。
+无头模式不会创建 GLFW 窗口，默认以 `400×300` 分辨率分别渲染主相机和腕部相机，再横向合成为视频。`--max_steps` 在无头模式下必须大于 0；视频按 `--control_hz`（默认 20 FPS）写入。默认输出会按模型分文件夹保存，例如 ACT 是 `output/act/act_seed0.mp4`，Diffusion 是 `output/diffusion/diffusion_seed0.mp4`，汇总文件也在对应文件夹中，例如 `output/act/act_summary.json`。添加 `--random_seeds=0` 可只跑首轮；需要降低渲染开销时可添加 `--render_width=320 --render_height=240`。如果想指定其它路径，仍可添加 `--video=自定义路径.mp4`。
 
 ### 步骤 5：采集语言条件数据（`collect_data_language.py`）
 
@@ -658,13 +696,13 @@ python vla/deploy_vla.py --config_path=config/vla/smolvla_franka.yaml
 
 ```bash
 # π0
-CUDA_VISIBLE_DEVICES=7 python vla/deploy_vla.py --config_path=config/vla/pi0_franka.yaml --checkpoint=./ckpt/pi0_franka/checkpoints/020000/pretrained_model --device=cuda --seed=0 --max_steps=2000 --headless --video=./outputs/pi0_seed0.mp4
+CUDA_VISIBLE_DEVICES=7 python vla/deploy_vla.py --config_path=config/vla/pi0_franka.yaml --checkpoint=./ckpt/pi0_franka/checkpoints/020000/pretrained_model --device=cuda --seed=0 --max_steps=2000 --headless
 
 # SmolVLA
-CUDA_VISIBLE_DEVICES=7 python vla/deploy_vla.py --config_path=config/vla/smolvla_franka.yaml --checkpoint=./ckpt/smolvla_franka/checkpoints/020000/pretrained_model --device=cuda --seed=0 --max_steps=2000 --headless --video=./outputs/smolvla_seed0.mp4
+CUDA_VISIBLE_DEVICES=7 python vla/deploy_vla.py --config_path=config/vla/smolvla_franka.yaml --checkpoint=./ckpt/smolvla_franka/checkpoints/020000/pretrained_model --device=cuda --seed=0 --max_steps=2000 --headless
 ```
 
-首轮成功后会自动再跑 10 个随机种子。每段视频顶部包含当前语言指令，最终生成 `outputs/smolvla_summary.json`，记录每个 seed、指令、步数、视频路径和总成功率。若只想固定测试红杯，可添加 `--instruction="Place the red mug on the plate."`；蓝杯同理。
+首轮成功后会自动再跑 10 个随机种子。每段视频顶部包含当前语言指令，视频默认保存到 `output/pi0/` 或 `output/smolvla/`，最终生成同目录下的 `pi0_summary.json` / `smolvla_summary.json`，记录每个 seed、指令、步数、视频路径和总成功率。若只想固定测试红杯，可添加 `--instruction="Place the red mug on the plate."`；蓝杯同理。
 
 ### `train_vla.py` —— 通用训练入口
 

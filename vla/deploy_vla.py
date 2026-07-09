@@ -1,4 +1,19 @@
-"""统一部署 π0 / SmolVLA，支持窗口、EGL 无头视频和多随机种子评估。"""
+"""统一部署 π0 / SmolVLA，支持窗口、EGL 无头视频和多随机种子评估。
+
+运行命令：
+
+    # π0：窗口部署
+    python vla/deploy_vla.py --config_path=config/vla/pi0_franka.yaml
+
+    # π0：无头部署，视频默认输出到 output/pi0/
+    CUDA_VISIBLE_DEVICES=7 python vla/deploy_vla.py --config_path=config/vla/pi0_franka.yaml --checkpoint=./ckpt/pi0_franka/checkpoints/020000/pretrained_model --device=cuda --seed=0 --max_steps=2000 --headless
+
+    # SmolVLA：窗口部署
+    python vla/deploy_vla.py --config_path=config/vla/smolvla_franka.yaml
+
+    # SmolVLA：无头部署，视频默认输出到 output/smolvla/
+    CUDA_VISIBLE_DEVICES=7 python vla/deploy_vla.py --config_path=config/vla/smolvla_franka.yaml --checkpoint=./ckpt/smolvla_franka/checkpoints/020000/pretrained_model --device=cuda --seed=0 --max_steps=2000 --headless
+"""
 
 from __future__ import annotations
 
@@ -49,7 +64,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--control_hz", type=int, default=20)
     parser.add_argument("--max_steps", type=int, default=0)
     parser.add_argument("--headless", action="store_true")
-    parser.add_argument("--video", default=None, help="Base MP4 path.")
+    parser.add_argument(
+        "--video",
+        default=None,
+        help="Base MP4 path; defaults to output/<policy>/<policy>_seed<N>.mp4.",
+    )
     parser.add_argument("--render_width", type=int, default=400)
     parser.add_argument("--render_height", type=int, default=300)
     parser.add_argument(
@@ -227,7 +246,8 @@ def main() -> None:
     )
     base_video = None
     if args.headless:
-        base_video = Path(args.video or f"./outputs/{requested_type}_seed{args.seed}.mp4").expanduser().resolve()
+        default_video = Path("output") / requested_type / f"{requested_type}_seed{args.seed}.mp4"
+        base_video = Path(args.video or default_video).expanduser().resolve()
         print(f"Headless EGL mode: first video will be saved to {base_video}")
 
     results: list[EpisodeResult] = []

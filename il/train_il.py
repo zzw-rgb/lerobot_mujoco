@@ -6,9 +6,12 @@
 - ``act``：Action Chunking Transformer
 - ``diffusion``：Diffusion Policy
 
-示例：
+运行命令：
 
+    # ACT
     python il/train_il.py --config_path=config/il/act_franka.yaml
+
+    # Diffusion Policy
     python il/train_il.py --config_path=config/il/diffusion_franka.yaml
 
 本文件直接复用当前 LeRobot 版本的通用训练器，因此优化器、

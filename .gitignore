@@ -4,6 +4,7 @@ demo_data_language
 omy_pnp
 omy_pnp_language
 ckpt
+output
 outputs
 wandb
 

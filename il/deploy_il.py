@@ -1,12 +1,20 @@
 """
 统一部署 ACT / Diffusion Policy。
 
-训练和部署使用同一份 YAML：
+运行命令：
 
+    # ACT：窗口部署
     python il/deploy_il.py --config_path=config/il/act_franka.yaml
+
+    # ACT：无头部署，视频默认输出到 output/act/
+    CUDA_VISIBLE_DEVICES=7 python il/deploy_il.py --config_path=config/il/act_franka.yaml --checkpoint=./ckpt/act_franka/checkpoints/020000/pretrained_model --device=cuda --seed=0 --max_steps=2000 --headless
+
+    # Diffusion Policy：窗口部署
     python il/deploy_il.py --config_path=config/il/diffusion_franka.yaml
-    CUDA_VISIBLE_DEVICES=7 python il/deploy_il.py --config_path=config/il/act_franka.yaml --headless --max_steps=2000 --video=./outputs/act.mp4
-    CUDA_VISIBLE_DEVICES=7 python il/deploy_il.py --config_path=config/il/diffusion_franka.yaml --headless --max_steps=2000 --video=./outputs/dp.mp4
+
+    # Diffusion Policy：无头部署，视频默认输出到 output/diffusion/
+    CUDA_VISIBLE_DEVICES=7 python il/deploy_il.py --config_path=config/il/diffusion_franka.yaml --checkpoint=./ckpt/diffusion_franka/checkpoints/020000/pretrained_model --device=cuda --seed=0 --max_steps=2000 --headless
+
 脚本会从 ``output_dir/checkpoints/last/pretrained_model`` 加载最新检查点，
 并根据检查点中的 ``input_features`` 自动决定使用主相机、腕部相机
 和末端位姿，不再在部署脚本里重复手写模型配置。
@@ -64,7 +72,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--control_hz", type=int, default=20, help="Policy control frequency.")
     parser.add_argument("--max_steps", type=int, default=0, help="Stop after N policy steps; 0 means unlimited.")
     parser.add_argument("--headless", action="store_true", help="Run without a GLFW window using EGL rendering.")
-    parser.add_argument("--video", default=None, help="MP4 output path; defaults to outputs/<policy>_seed<N>.mp4.")
+    parser.add_argument(
+        "--video",
+        default=None,
+        help="MP4 output path; defaults to output/<policy>/<policy>_seed<N>.mp4.",
+    )
     parser.add_argument("--render_width", type=int, default=400, help="Headless camera width.")
     parser.add_argument("--render_height", type=int, default=300, help="Headless camera height.")
     parser.add_argument(
@@ -229,7 +241,8 @@ def main() -> None:
     )
     base_video = None
     if args.headless:
-        base_video = Path(args.video or f"./outputs/{requested_type}_seed{args.seed}.mp4").expanduser().resolve()
+        default_video = Path("output") / requested_type / f"{requested_type}_seed{args.seed}.mp4"
+        base_video = Path(args.video or default_video).expanduser().resolve()
         print(f"Headless EGL mode: first video will be saved to {base_video}")
 
     results: list[EpisodeResult] = []
