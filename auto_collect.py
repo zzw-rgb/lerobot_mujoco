@@ -32,6 +32,8 @@ import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from headless_gl import configure_headless_gl, option_from_argv, render_diagnostics
+
 
 # =============================================================================
 # 用户配置区：日常只改这里，然后直接运行 python auto_collect.py
@@ -44,7 +46,7 @@ from pathlib import Path
 AUTO_MODE = "ask"
 
 # 想成功保存多少条 episode。调试专家轨迹时建议 3~5，正式采集再改成 50/100。
-AUTO_NUM_DEMOS = 200
+AUTO_NUM_DEMOS = 100
 
 # 数据保存目录。
 #   None：根据模式自动使用 ./demo_data 或 ./demo_data_language，直接覆盖/生成训练用数据。
@@ -67,6 +69,12 @@ AUTO_APPEND = False
 
 # 服务器无桌面改成 True；本地想看 MuJoCo 窗口就保持 False。
 AUTO_HEADLESS = False
+
+# "auto" 会按系统选择：Windows=WGL、Linux=EGL、macOS=CGL。
+# Linux 没有可用的 NVIDIA EGL 时可改为 "osmesa"（需要系统安装 libosmesa6）。
+AUTO_GL_BACKEND = "auto"
+# 多 GPU Linux 服务器只有 EGL 选错卡时才填写物理显卡编号；通常保持 None。
+AUTO_EGL_DEVICE_ID = None
 
 # 本地窗口显示；AUTO_HEADLESS=True 时会自动关闭。
 AUTO_RENDER = True
@@ -112,8 +120,10 @@ AUTO_INSTRUCTION = None
 
 
 if "--headless" in sys.argv or (AUTO_HEADLESS and "--no_headless" not in sys.argv and "--no-headless" not in sys.argv):
-    # 必须在导入 mujoco / 环境封装之前设置。
-    os.environ.setdefault("MUJOCO_GL", "egl")
+    # 必须在导入 mujoco / OpenGL / 环境封装之前设置；这里不能用 setdefault，
+    # 否则 shell 中遗留的 glfw/egl 会覆盖本次无头配置。
+    _requested_gl_backend = option_from_argv(sys.argv, "--gl_backend", AUTO_GL_BACKEND)
+    configure_headless_gl(_requested_gl_backend, AUTO_EGL_DEVICE_ID)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -123,6 +133,7 @@ os.chdir(PROJECT_ROOT)
 
 import numpy as np
 from PIL import Image
+from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
 
 
 TASK_NAME_IL = "Put mug cup on the plate"
@@ -169,8 +180,14 @@ def parse_args() -> argparse.Namespace:
         help="What to do when the dataset root already exists.",
     )
 
-    parser.add_argument("--headless", action=argparse.BooleanOptionalAction, default=AUTO_HEADLESS, help="Use EGL offscreen rendering instead of a GLFW window.")
+    parser.add_argument("--headless", action=argparse.BooleanOptionalAction, default=AUTO_HEADLESS, help="Use platform-appropriate offscreen rendering without a viewer window.")
     parser.add_argument("--no_headless", action="store_false", dest="headless", help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--gl_backend",
+        choices=sorted({"auto", "egl", "osmesa", "wgl", "cgl", "glfw"}),
+        default=AUTO_GL_BACKEND,
+        help="Offscreen OpenGL backend. auto selects WGL/EGL/CGL by platform.",
+    )
     parser.add_argument("--render", action=argparse.BooleanOptionalAction, default=AUTO_RENDER, help="Render the GUI window while collecting. Enabled by default unless --headless is used.")
     parser.add_argument("--no_render", action="store_true", help="Do not refresh the GUI window when running without --headless.")
     parser.add_argument("--render_width", type=int, default=AUTO_RENDER_WIDTH, help="Offscreen camera width.")
@@ -265,6 +282,26 @@ def load_dataset_info(root: Path) -> dict:
         return {}
     with info_path.open("r", encoding="utf-8") as file:
         return json.load(file)
+
+
+def expected_state_shape(mode: str) -> tuple[int]:
+    """新数据统一把夹爪命令放进本体状态。"""
+    return (7,) if mode == "il" else (8,)
+
+
+def validate_existing_dataset_schema(root: Path, mode: str) -> None:
+    """阻止把修复后的帧追加到旧版 6/7 维状态数据集中。"""
+    info = load_dataset_info(root)
+    state_feature = info.get("features", {}).get("observation.state", {})
+    actual_shape = tuple(state_feature.get("shape", ()))
+    expected_shape = expected_state_shape(mode)
+    if actual_shape and actual_shape != expected_shape:
+        raise ValueError(
+            "现有数据集使用旧版 observation.state 结构："
+            f"{actual_shape}，修复后的 {mode.upper()} 数据需要 {expected_shape}（包含夹爪状态）。\n"
+            "旧数据的 action 还存在时间对齐错误，不能继续追加。"
+            "请重新运行并选择“删除重采”，或使用 --force 覆盖旧数据集。"
+        )
 
 
 def episode_parquet_path(root: Path, episode_index: int, info: dict | None = None) -> Path:
@@ -519,8 +556,6 @@ def validate_camera_image(image: np.ndarray, camera_name: str) -> None:
 
 
 def create_or_load_dataset(args: argparse.Namespace) -> LeRobotDataset:
-    from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
-
     root = Path(args.root or DEFAULTS[args.mode]["root"])
     repo_id = args.repo_id or DEFAULTS[args.mode]["repo_id"]
     args.dataset_action = "create"
@@ -544,17 +579,17 @@ def create_or_load_dataset(args: argparse.Namespace) -> LeRobotDataset:
         elif action == "append":
             print(f"继续采集，不覆盖旧数据：{root}")
             args.dataset_action = "append"
+            validate_existing_dataset_schema(root, args.mode)
             valid_episodes = count_meta_episodes(root)
             if AUTO_REPAIR_INVALID_TAIL:
                 valid_episodes = repair_invalid_tail(root)
             cleanup_orphan_episode_files(root, valid_episodes)
             return LeRobotDataset(repo_id, root=root)
 
+    state_shape = expected_state_shape(args.mode)
     if args.mode == "il":
-        state_shape = (6,)
         obj_init_shape = (6,)
     else:
-        state_shape = (7,)
         obj_init_shape = (9,)
 
     print(f"Creating dataset: repo_id={repo_id!r}, root={root}")
@@ -637,6 +672,40 @@ def make_env(args: argparse.Namespace):
             render_height=args.render_height,
         )
     return env
+
+
+def preflight_headless_renderer(args: argparse.Namespace) -> None:
+    """在改动数据集目录前验证离屏上下文和两路相机，失败时给出可操作提示。"""
+    print(f"Headless preflight: {render_diagnostics()}")
+    env = None
+    try:
+        env = make_env(args)
+        agent_image, wrist_image = env.grab_image()
+        validate_camera_image(agent_image, "agent camera preflight")
+        validate_camera_image(wrist_image, "wrist camera preflight")
+        print(
+            "Headless renderer OK: "
+            f"agent={agent_image.shape}/std={float(np.std(agent_image)):.2f}, "
+            f"wrist={wrist_image.shape}/std={float(np.std(wrist_image)):.2f}"
+        )
+    except Exception as exc:
+        backend = os.environ.get("MUJOCO_GL", "unknown")
+        fallback = (
+            "Linux EGL 失败时请安装/检查 NVIDIA EGL；CPU 服务器可改用 "
+            "--gl_backend=osmesa，并安装 libosmesa6。"
+            if sys.platform.startswith("linux")
+            else "请保持 --gl_backend=auto；Windows 会自动使用 WGL。"
+        )
+        raise RuntimeError(
+            f"Headless renderer preflight failed with MUJOCO_GL={backend!r}. "
+            f"{fallback}\nDiagnostics: {render_diagnostics()}"
+        ) from exc
+    finally:
+        if env is not None:
+            if hasattr(env, "close"):
+                env.close()
+            else:
+                env.env.close_viewer()
 
 
 def get_task(env, mode: str) -> str:
@@ -725,21 +794,26 @@ def record_frame(
     agent_256 = resize_image(agent_image)
     wrist_256 = resize_image(wrist_image)
 
+    # observation 必须来自下发动作之前的时刻；夹爪状态也属于本体状态，否则
+    # 抓取前后画面相似时，模型无法判断当前究竟是张开还是闭合。
     if args.mode == "il":
-        observation_state = env.get_ee_pose().astype(np.float32)
+        observation_state = np.concatenate(
+            [env.get_ee_pose(), np.array([env.gripper_command], dtype=np.float32)]
+        ).astype(np.float32)
     else:
-        observation_state = None
+        observation_state = env.get_joint_state().astype(np.float32)
 
-    joint_q = env.step(action).astype(np.float32)
-    if args.mode == "vla":
-        observation_state = joint_q[:7].astype(np.float32)
+    # step() 返回的是当前实际状态，不是动作标签。真正的监督目标是 IK/控制器
+    # 本帧下发的绝对关节目标 + 归一化夹爪命令。
+    env.step(action)
+    command_action = env.get_command_action().astype(np.float32)
 
     dataset.add_frame(
         {
             "observation.image": agent_256,
             "observation.wrist_image": wrist_256,
             "observation.state": observation_state,
-            "action": joint_q,
+            "action": command_action,
             "obj_init": env.obj_init_pose.astype(np.float32),
         },
         task=task,
@@ -1037,6 +1111,11 @@ def main() -> None:
     if args.mode == "il" and args.instruction:
         raise ValueError("--instruction is only valid for --mode=vla.")
 
+    # 先验证无头渲染，再执行 --force 删除/创建数据集；即使 EGL/WGL 配置失败，
+    # 也不会误删用户已有数据。
+    if args.headless:
+        preflight_headless_renderer(args)
+
     dataset = create_or_load_dataset(args)
     env = make_env(args)
     physics_steps = args.physics_steps or max(1, int(round(env.env.HZ / args.fps)))
@@ -1053,6 +1132,8 @@ def main() -> None:
     print(f"Max attempts: {max_attempts}")
     print(f"Physics steps per frame: {physics_steps}")
     print(f"Headless: {args.headless}")
+    if args.headless:
+        print(f"Headless GL: {render_diagnostics()}")
 
     if not args.headless:
         print(

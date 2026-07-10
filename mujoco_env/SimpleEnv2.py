@@ -123,6 +123,9 @@ class SimpleEnv2:
         self.last_q = copy.deepcopy(q_zero)
         self.q = np.concatenate([q_zero, np.array([255.0])])  # 底层 MuJoCo 控制量：255=张开
         self.gripper_command = 0.0  # 对外统一语义：0=张开，1=闭合
+        # 数据集中的 action 必须保存本帧真正下发的目标命令，而不是控制执行前的
+        # 当前关节位置。compute_q/get_command_action 专门维护这份动作标签。
+        self.compute_q = copy.deepcopy(q_zero)
         self.gripper_latched = False  # 闭合锁存：夹住后持续给满闭合力，避免策略抖动造成回弹
         self.gripper_close_threshold = 0.75
         self.gripper_open_threshold = 0.25
@@ -225,6 +228,12 @@ class SimpleEnv2:
             return dq
         else:
             raise ValueError('state_type not recognized')
+
+    def get_command_action(self):
+        """返回最近一次 ``step`` 下发的 7 关节目标和归一化夹爪命令。"""
+        return np.concatenate(
+            [np.asarray(self.compute_q, dtype=np.float32), np.array([self.gripper_command], dtype=np.float32)]
+        )
 
     def step_env(self):
         self.env.step(self.q)

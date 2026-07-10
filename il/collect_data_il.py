@@ -106,8 +106,8 @@ PnPEnv = SimpleEnv(xml_path, seed = SEED, state_type = 'joint_angle')
 #   - observation.image：相机拍到的画面（智能体视角），256x256 的彩色图（3 通道=RGB）。
 #       “observation(观测)”=机器人在某一刻“看到/感知到”的信息。
 #   - observation.wrist_image：装在机械臂手腕上的相机拍到的画面（第一人称/近距离视角）。
-#   - observation.state：机器人当前的“状态”，这里是末端执行器的位姿，6 个数字：
-#       x,y,z（在空间中的位置）+ roll,pitch,yaw（绕三个轴的旋转角度，即朝向）。
+#   - observation.state：机器人当前的“状态”，这里是 7 个数字：
+#       末端位姿 x,y,z,roll,pitch,yaw + 当前夹爪命令（0=张开，1=闭合）。
 #   - action：“动作”，即这一帧机器人实际执行的指令，8 个数字 = 7 个关节角 + 1 个夹爪开合。
 #       简单理解：observation 是“看到啥”，action 是“于是做了啥”，AI 就是学这个对应关系。
 #   - obj_init：物体（杯子）的初始位置，仅作记录，训练时不用。
@@ -128,8 +128,8 @@ PnPEnv = SimpleEnv(xml_path, seed = SEED, state_type = 'joint_angle')
 #     },
 #     "observation.state": {
 #         "dtype": "float32",
-#         "shape": (6,),
-#         "names": ["state"], # x, y, z, roll, pitch, yaw
+#         "shape": (7,),
+#         "names": ["state"], # x, y, z, roll, pitch, yaw, gripper
 #     },
 #     "action": {
 #         "dtype": "float32",
@@ -198,8 +198,8 @@ if create_new:
                     },
                     "observation.state": {
                         "dtype": "float32",
-                        "shape": (6,),
-                        "names": ["state"], # x, y, z, roll, pitch, yaw
+                        "shape": (7,),
+                        "names": ["state"], # x, y, z, roll, pitch, yaw, gripper
                     },
                     "action": {
                         "dtype": "float32",
@@ -327,8 +327,10 @@ while PnPEnv.env.is_viewer_alive() and episode_id < NUM_DEMO:
             dataset.clear_episode_buffer()   # 清掉缓冲区里这回合的临时数据（相当于“这局不要了”）
             record_flag = False              # 关掉记录开关，等下次重新动起来再录
         # 采集这一帧的“观测”信息：
-        # 获取末端执行器位姿（6 个数：x,y,z + roll,pitch,yaw），作为机器人的 state。
-        ee_pose = PnPEnv.get_ee_pose()
+        # 状态必须在动作下发前采样；加入夹爪命令，避免抓取前后状态产生歧义。
+        robot_state = np.concatenate(
+            [PnPEnv.get_ee_pose(), np.array([PnPEnv.gripper_command], dtype=np.float32)]
+        ).astype(np.float32)
         # 抓取两路相机画面：agent_image=智能体视角全景，wrist_image=手腕相机近景。
         agent_image,wrist_image = PnPEnv.grab_image()
         # ---- 把图像统一缩放到 256x256 ----
@@ -341,9 +343,10 @@ while PnPEnv.env.is_viewer_alive() and episode_id < NUM_DEMO:
         wrist_image = wrist_image.resize((256, 256))
         agent_image = np.array(agent_image)            # 再转回 numpy 数组，方便后续存储
         wrist_image = np.array(wrist_image)
-        # 把动作 action 真正下发给机器人执行，并让仿真前进一步；
-        # 返回 joint_q = 执行后机器人的 7 个关节量（6 关节角 + 1 夹爪），作为本帧记录的 action。
-        joint_q = PnPEnv.step(action)
+        # step() 的返回值是当前实际状态，不能当作动作标签。动作标签应使用本帧
+        # 真正下发给控制器的 7 个绝对关节目标 + 1 个归一化夹爪命令。
+        PnPEnv.step(action)
+        command_action = PnPEnv.get_command_action()
         if record_flag:
             # 只有在“记录中”才把这一帧加入数据集。
             # add_frame：往当前回合的缓冲区里追加“一帧”数据（一帧=某一时刻的观测+动作）。
@@ -351,8 +354,8 @@ while PnPEnv.env.is_viewer_alive() and episode_id < NUM_DEMO:
             dataset.add_frame( {
                     "observation.image": agent_image,       # 全景相机画面
                     "observation.wrist_image": wrist_image, # 手腕相机画面
-                    "observation.state": ee_pose,           # 末端位姿（机器人当前状态）
-                    "action": joint_q,                      # 本帧执行的动作（关节角+夹爪）
+                    "observation.state": robot_state,       # 末端位姿 + 当前夹爪状态
+                    "action": command_action,               # 本帧下发的目标关节角 + 夹爪命令
                     "obj_init": PnPEnv.obj_init_pose,        # 物体初始位置（仅记录，训练不用）
                     # "task": TASK_NAME,
                 }, task = TASK_NAME                          # 任务文字描述

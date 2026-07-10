@@ -8,8 +8,8 @@
 
 运行命令：
 
-    # ACT
-    python il/train_il.py --config_path=config/il/act_franka.yaml
+    # ACT（50k steps，输出到 ckpt/act_franka_v2）
+    CUDA_VISIBLE_DEVICES=0 python il/train_il.py --config_path=config/il/act_franka.yaml
 
     # Diffusion Policy
     python il/train_il.py --config_path=config/il/diffusion_franka.yaml

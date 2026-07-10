@@ -5,21 +5,23 @@ dataset:
 policy:
   type: act
   device: cuda
-  chunk_size: 10
+  # 在 20 Hz 数据上预测未来 2.5 秒，但只执行 0.5 秒就重新观察和规划。
+  # 比旧版 10/10 更能学习“接近-抓取-搬运”的连续趋势，同时避免长时间开环漂移。
+  chunk_size: 50
   n_action_steps: 10
-  temporal_ensemble_coeff: null
+  temporal_ensemble_coeff: null  # 保持关闭；启用时 n_action_steps 必须为 1，推理会更慢
 
-output_dir: ./ckpt/act_franka
-job_name: act_franka
+output_dir: ./ckpt/act_franka_v2  # 新状态/action 结构，和旧错误检查点分开
+job_name: act_franka_v2
 resume: false
 seed: 42
 num_workers: 0
 batch_size: 16
-steps: 20_000
-eval_freq: -1
+steps: 50_000
+eval_freq: -1  # 本项目使用 deploy_il.py 在固定随机种子上评估
 log_freq: 50
 save_checkpoint: true
-save_freq: 10_000
+save_freq: 5_000  # 多保留中间检查点，按真实成功率选模型而不是只看 loss
 use_policy_training_preset: true
 
 wandb:

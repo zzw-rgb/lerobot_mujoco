@@ -27,14 +27,14 @@
 
 运行命令（在配置文件里写好所有超参数，然后用 --config_path 指定它）：
 
-    # π0 单卡
-    python vla/train_vla.py --config_path=config/vla/pi0_franka.yaml
+    # π0 单卡（40k steps，输出到 ckpt/pi0_franka_v2）
+    CUDA_VISIBLE_DEVICES=0 python vla/train_vla.py --config_path=config/vla/pi0_franka.yaml
 
     # π0 多卡（例：3 张卡）
     CUDA_VISIBLE_DEVICES=2,3,4 accelerate launch --num_processes=3 --main_process_port=29501 vla/train_vla.py --config_path=config/vla/pi0_franka.yaml
 
-    # SmolVLA 单卡
-    python vla/train_vla.py --config_path=config/vla/smolvla_franka.yaml
+    # SmolVLA 单卡（30k steps，输出到 ckpt/smolvla_franka_v2）
+    CUDA_VISIBLE_DEVICES=0 python vla/train_vla.py --config_path=config/vla/smolvla_franka.yaml
 
     # SmolVLA 多卡（例：3 张卡）
     CUDA_VISIBLE_DEVICES=5,6,7 accelerate launch --num_processes=3 --main_process_port=29502 vla/train_vla.py --config_path=config/vla/smolvla_franka.yaml
@@ -188,6 +188,15 @@ def update_policy(
 @parser.wrap()
 def train(cfg: TrainPipelineConfig):
     cfg.validate()  # 校验配置合法性（参数齐全、取值合理等）
+
+    # 当前 requirements.txt 锁定的 LeRobot π0 实现会用 n_action_steps 构造
+    # 训练动作 token，而数据采样长度由 chunk_size 决定；二者不相等会在 loss
+    # 计算时产生时间维度不一致。SmolVLA 已正确区分预测长度和执行长度。
+    if cfg.policy.type == "pi0" and cfg.policy.n_action_steps != cfg.policy.chunk_size:
+        raise ValueError(
+            "For the pinned LeRobot PI0 implementation, policy.n_action_steps must equal "
+            f"policy.chunk_size; got {cfg.policy.n_action_steps} and {cfg.policy.chunk_size}."
+        )
 
     # === 多卡/分布式训练初始化（Accelerate）===
     # Accelerator 统一管理进程组、设备分配、混合精度与梯度同步。用普通
@@ -466,8 +475,12 @@ if __name__ == "__main__":
     init_logging()  # 初始化日志格式
     # 调用 train()，但实参 cfg 由 @parser.wrap() 从命令行 --config_path 自动解析注入，
     # 因此这里不需要、也不能手动传参。
-    # 单卡运行：
-    #   python vla/train_vla.py --config_path=config/vla/pi0_franka.yaml
-    # 多卡运行（N=参与训练的 GPU 数量，分布式数据并行 DDP）：
-    #   accelerate launch --num_processes=N vla/train_vla.py --config_path=config/vla/pi0_franka.yaml
+    # π0 单卡：
+    #   CUDA_VISIBLE_DEVICES=0 python vla/train_vla.py --config_path=config/vla/pi0_franka.yaml
+    # π0 三卡：
+    #   CUDA_VISIBLE_DEVICES=2,3,4 accelerate launch --num_processes=3 --main_process_port=29501 vla/train_vla.py --config_path=config/vla/pi0_franka.yaml
+    # SmolVLA 单卡：
+    #   CUDA_VISIBLE_DEVICES=0 python vla/train_vla.py --config_path=config/vla/smolvla_franka.yaml
+    # SmolVLA 三卡：
+    #   CUDA_VISIBLE_DEVICES=5,6,7 accelerate launch --num_processes=3 --main_process_port=29502 vla/train_vla.py --config_path=config/vla/smolvla_franka.yaml
     train()

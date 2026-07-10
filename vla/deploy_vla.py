@@ -1,4 +1,4 @@
-"""统一部署 π0 / SmolVLA，支持窗口、EGL 无头视频和多随机种子评估。
+"""统一部署 π0 / SmolVLA，支持窗口、跨平台无头视频和多随机种子评估。
 
 运行命令：
 
@@ -6,13 +6,13 @@
     python vla/deploy_vla.py --config_path=config/vla/pi0_franka.yaml
 
     # π0：无头部署，视频默认输出到 output/pi0/
-    CUDA_VISIBLE_DEVICES=7 python vla/deploy_vla.py --config_path=config/vla/pi0_franka.yaml --checkpoint=./ckpt/pi0_franka/checkpoints/020000/pretrained_model --device=cuda --seed=0 --max_steps=2000 --headless
+    CUDA_VISIBLE_DEVICES=7 python vla/deploy_vla.py --config_path=config/vla/pi0_franka.yaml --checkpoint=./ckpt/pi0_franka_v2/checkpoints/040000/pretrained_model --device=cuda --seed=0 --max_steps=2000 --headless
 
     # SmolVLA：窗口部署
     python vla/deploy_vla.py --config_path=config/vla/smolvla_franka.yaml
 
     # SmolVLA：无头部署，视频默认输出到 output/smolvla/
-    CUDA_VISIBLE_DEVICES=7 python vla/deploy_vla.py --config_path=config/vla/smolvla_franka.yaml --checkpoint=./ckpt/smolvla_franka/checkpoints/020000/pretrained_model --device=cuda --seed=0 --max_steps=2000 --headless
+    CUDA_VISIBLE_DEVICES=7 python vla/deploy_vla.py --config_path=config/vla/smolvla_franka.yaml --checkpoint=./ckpt/smolvla_franka_v2/checkpoints/030000/pretrained_model --device=cuda --seed=0 --max_steps=2000 --headless
 """
 
 from __future__ import annotations
@@ -22,9 +22,15 @@ import os
 import sys
 from pathlib import Path
 
-# 必须在导入 mujoco/SimpleEnv2 之前选择 EGL。
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from headless_gl import configure_headless_gl, option_from_argv, render_diagnostics
+
+# 必须在导入 mujoco/SimpleEnv2 之前选择跨平台离屏后端。
 if "--headless" in sys.argv:
-    os.environ["MUJOCO_GL"] = "egl"
+    configure_headless_gl(option_from_argv(sys.argv, "--gl_backend", "auto"))
 
 import numpy as np
 import torch
@@ -33,9 +39,6 @@ from PIL import Image
 from torchvision.transforms.functional import to_tensor
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
 os.chdir(PROJECT_ROOT)
 
 from lerobot.common.datasets.lerobot_dataset import LeRobotDatasetMetadata
@@ -64,6 +67,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--control_hz", type=int, default=20)
     parser.add_argument("--max_steps", type=int, default=0)
     parser.add_argument("--headless", action="store_true")
+    parser.add_argument(
+        "--gl_backend",
+        choices=["auto", "egl", "osmesa", "wgl", "cgl", "glfw"],
+        default="auto",
+        help="Headless GL backend; auto selects WGL/EGL/CGL by platform.",
+    )
     parser.add_argument(
         "--video",
         default=None,
@@ -138,6 +147,20 @@ def build_observation(policy, state: np.ndarray, agent_image: np.ndarray, wrist_
     return observation
 
 
+def get_policy_state(policy, env) -> np.ndarray:
+    """按检查点期望维度生成状态，兼容旧 7 维和新 8 维 VLA。"""
+    feature = policy.config.input_features.get("observation.state")
+    if feature is None:
+        raise KeyError("VLA checkpoint does not define observation.state")
+    expected_dim = int(feature.shape[0])
+    full_state = env.get_joint_state().astype(np.float32)
+    if expected_dim == 7:  # 旧检查点：仅 7 个关节角
+        return full_state[:7]
+    if expected_dim == 8:  # 新检查点：7 个关节角 + 当前夹爪状态
+        return full_state
+    raise ValueError(f"Unsupported VLA observation.state shape: {feature.shape}")
+
+
 def run_episode(policy, env, args: argparse.Namespace, seed: int, video_path: Path | None) -> EpisodeResult:
     env.reset(seed)
     if args.instruction:
@@ -157,7 +180,7 @@ def run_episode(policy, env, args: argparse.Namespace, seed: int, video_path: Pa
             if not env.env.loop_every(HZ=args.control_hz):
                 continue
 
-            state = env.get_joint_state()[:7]
+            state = get_policy_state(policy, env)
             agent_image, wrist_image = env.grab_image()
             observation = build_observation(policy, state, agent_image, wrist_image, instruction)
             with torch.inference_mode():
@@ -199,8 +222,10 @@ def main() -> None:
         raise ValueError("render_width 和 render_height 必须大于 0。")
     if args.random_seeds < 0:
         raise ValueError("random_seeds 不能小于 0。")
+    if args.headless:
+        print(f"Headless GL: {render_diagnostics()}")
 
-    # 延迟导入，确保 EGL 后端在 mujoco 第一次加载前生效。
+    # 延迟导入，确保离屏 GL 后端在 mujoco 第一次加载前生效。
     from mujoco_env.SimpleEnv2 import SimpleEnv2
 
     train_config = load_yaml(args.config_path)

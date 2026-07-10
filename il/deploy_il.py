@@ -7,7 +7,7 @@
     python il/deploy_il.py --config_path=config/il/act_franka.yaml
 
     # ACT：无头部署，视频默认输出到 output/act/
-    CUDA_VISIBLE_DEVICES=7 python il/deploy_il.py --config_path=config/il/act_franka.yaml --checkpoint=./ckpt/act_franka/checkpoints/020000/pretrained_model --device=cuda --seed=0 --max_steps=2000 --headless
+    CUDA_VISIBLE_DEVICES=7 python il/deploy_il.py --config_path=config/il/act_franka.yaml --checkpoint=./ckpt/act_franka_v2/checkpoints/050000/pretrained_model --device=cuda --seed=0 --max_steps=2000 --headless
 
     # Diffusion Policy：窗口部署
     python il/deploy_il.py --config_path=config/il/diffusion_franka.yaml
@@ -27,9 +27,15 @@ import os
 import sys
 from pathlib import Path
 
-# 必须在导入 mujoco/SimpleEnv 之前选择 EGL，否则无桌面服务器会退回 GLFW/llvmpipe。
+# 先把项目根目录放进模块路径，再在导入 mujoco/SimpleEnv 前选择跨平台后端。
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from headless_gl import configure_headless_gl, option_from_argv, render_diagnostics
+
 if "--headless" in sys.argv:
-    os.environ["MUJOCO_GL"] = "egl"
+    configure_headless_gl(option_from_argv(sys.argv, "--gl_backend", "auto"))
 
 import numpy as np
 import torch
@@ -43,9 +49,6 @@ for stream in (sys.stdout, sys.stderr):
         stream.reconfigure(encoding="utf-8", errors="replace")
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
 os.chdir(PROJECT_ROOT)
 
 from lerobot.common.policies.factory import get_policy_class
@@ -71,7 +74,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=0, help="MuJoCo scene seed.")
     parser.add_argument("--control_hz", type=int, default=20, help="Policy control frequency.")
     parser.add_argument("--max_steps", type=int, default=0, help="Stop after N policy steps; 0 means unlimited.")
-    parser.add_argument("--headless", action="store_true", help="Run without a GLFW window using EGL rendering.")
+    parser.add_argument("--headless", action="store_true", help="Run with platform-appropriate offscreen rendering.")
+    parser.add_argument(
+        "--gl_backend",
+        choices=["auto", "egl", "osmesa", "wgl", "cgl", "glfw"],
+        default="auto",
+        help="Headless GL backend; auto selects WGL/EGL/CGL by platform.",
+    )
     parser.add_argument(
         "--video",
         default=None,
@@ -146,6 +155,22 @@ def build_observation(policy, state: np.ndarray, agent_image: np.ndarray, wrist_
     return {key: value.to(policy.config.device) for key, value in observation.items()}
 
 
+def get_policy_state(policy, env) -> np.ndarray:
+    """按检查点期望维度生成状态，同时兼容旧版和修复后的 ACT。"""
+    feature = policy.config.input_features.get("observation.state")
+    if feature is None:
+        raise KeyError("ACT checkpoint does not define observation.state")
+    expected_dim = int(feature.shape[0])
+    ee_pose = env.get_ee_pose().astype(np.float32)
+    if expected_dim == 6:  # 旧检查点：仅末端位姿
+        return ee_pose
+    if expected_dim == 7:  # 新检查点：末端位姿 + 当前夹爪状态
+        return np.concatenate(
+            [ee_pose, np.array([env.gripper_command], dtype=np.float32)]
+        ).astype(np.float32)
+    raise ValueError(f"Unsupported ACT observation.state shape: {feature.shape}")
+
+
 def run_episode(policy, env, args: argparse.Namespace, seed: int, video_path: Path | None) -> EpisodeResult:
     """运行一个完整回合，返回是否成功、执行步数和视频路径。"""
     env.reset(seed)
@@ -163,7 +188,7 @@ def run_episode(policy, env, args: argparse.Namespace, seed: int, video_path: Pa
             if not env.env.loop_every(HZ=args.control_hz):
                 continue
 
-            state = env.get_ee_pose()
+            state = get_policy_state(policy, env)
             agent_image, wrist_image = env.grab_image()
             observation = build_observation(policy, state, agent_image, wrist_image)
 
@@ -199,8 +224,10 @@ def main() -> None:
         raise ValueError("render_width 和 render_height 必须大于 0。")
     if args.random_seeds < 0:
         raise ValueError("random_seeds 不能小于 0。")
+    if args.headless:
+        print(f"Headless GL: {render_diagnostics()}")
 
-    # 延迟导入，确保上面的 MUJOCO_GL=egl 在 mujoco 第一次加载之前生效。
+    # 延迟导入，确保离屏 GL 后端在 mujoco 第一次加载之前生效。
     from mujoco_env.SimpleEnv1 import SimpleEnv
 
     train_config = load_yaml(args.config_path)

@@ -28,7 +28,7 @@ ACT：
 ```bash
 python il/train_il.py --config_path=config/il/act_franka.yaml
 python il/deploy_il.py --config_path=config/il/act_franka.yaml
-CUDA_VISIBLE_DEVICES=7 python il/deploy_il.py --config_path=config/il/act_franka.yaml --checkpoint=./ckpt/act_franka/checkpoints/020000/pretrained_model --device=cuda --seed=0 --max_steps=2000 --headless
+CUDA_VISIBLE_DEVICES=7 python il/deploy_il.py --config_path=config/il/act_franka.yaml --checkpoint=./ckpt/act_franka_v2/checkpoints/050000/pretrained_model --device=cuda --seed=0 --max_steps=2000 --headless
 ```
 
 Diffusion Policy：
@@ -45,7 +45,7 @@ CUDA_VISIBLE_DEVICES=7 python il/deploy_il.py --config_path=config/il/diffusion_
 python vla/train_vla.py --config_path=config/vla/pi0_franka.yaml
 CUDA_VISIBLE_DEVICES=2,3,4 accelerate launch --num_processes=3 --main_process_port=29501 vla/train_vla.py --config_path=config/vla/pi0_franka.yaml
 python vla/deploy_vla.py --config_path=config/vla/pi0_franka.yaml
-CUDA_VISIBLE_DEVICES=7 python vla/deploy_vla.py --config_path=config/vla/pi0_franka.yaml --checkpoint=./ckpt/pi0_franka/checkpoints/020000/pretrained_model --device=cuda --seed=0 --max_steps=2000 --headless
+CUDA_VISIBLE_DEVICES=7 python vla/deploy_vla.py --config_path=config/vla/pi0_franka.yaml --checkpoint=./ckpt/pi0_franka_v2/checkpoints/040000/pretrained_model --device=cuda --seed=0 --max_steps=2000 --headless
 ```
 
 SmolVLA：
@@ -54,7 +54,7 @@ SmolVLA：
 python vla/train_vla.py --config_path=config/vla/smolvla_franka.yaml
 CUDA_VISIBLE_DEVICES=5,6,7 accelerate launch --num_processes=3 --main_process_port=29502 vla/train_vla.py --config_path=config/vla/smolvla_franka.yaml
 python vla/deploy_vla.py --config_path=config/vla/smolvla_franka.yaml
-CUDA_VISIBLE_DEVICES=7 python vla/deploy_vla.py --config_path=config/vla/smolvla_franka.yaml --checkpoint=./ckpt/smolvla_franka/checkpoints/020000/pretrained_model --device=cuda --seed=0 --max_steps=2000 --headless
+CUDA_VISIBLE_DEVICES=7 python vla/deploy_vla.py --config_path=config/vla/smolvla_franka.yaml --checkpoint=./ckpt/smolvla_franka_v2/checkpoints/030000/pretrained_model --device=cuda --seed=0 --max_steps=2000 --headless
 ```
 
 无头部署不写 `--video` 时会自动按模型保存到 `output/act/`、`output/diffusion/`、`output/pi0/` 或 `output/smolvla/`。
@@ -290,10 +290,10 @@ cd ../..                # 回到项目根目录
 ### 5. 关于"无显示器"的服务器
 
 - **需要图形界面（有显示器/桌面）的脚本**：所有遥操作采集（`collect_data_il.py`、`collect_data_language.py`）和带窗口回放脚本。
-- **纯命令行服务器即可**：训练脚本、上传脚本，以及带 `--headless` 的 `deploy_il.py` / `deploy_vla.py`。无头部署使用 EGL 离屏渲染，并把两路相机结果保存为 MP4。
+- **纯命令行服务器即可**：训练脚本、上传脚本，以及带 `--headless` 的自动采集/部署脚本。无头模式使用离屏渲染，并把两路相机结果保存为 MP4。
 
 > 如果只有一台无显示器的 GPU 服务器，可以在本地采集数据，或用 `push_dataset_il.py` / `push_dataset_language.py` 上传后在服务器训练。
-> 无头部署需要 NVIDIA 驱动提供 EGL；脚本会在导入 MuJoCo 前自动设置 `MUJOCO_GL=egl`。
+> 脚本会在导入 MuJoCo 前自动选择后端：Windows 使用 WGL、Linux 使用 EGL、macOS 使用 CGL。Linux CPU 服务器没有 EGL 时，可安装 `libosmesa6` 并临时增加 `--gl_backend=osmesa`。
 
 ### 6. 用 Git 把本机修改同步到 Linux 服务器
 
@@ -346,8 +346,8 @@ pip install opencv-python
 |------|------|------|------|
 | `observation.image` | image | (256, 256, 3) | 智能体视角（agentview）相机图 |
 | `observation.wrist_image` | image | (256, 256, 3) | 腕部（第一人称 egocentric）相机图 |
-| `observation.state` | float32 | (6,) | 末端执行器位姿 `[x, y, z, roll, pitch, yaw]` |
-| `action` | float32 | (8,) | 7 个关节角 + 1 个夹爪开合（0=张开，1=闭合） |
+| `observation.state` | float32 | (7,) | 末端位姿 `[x, y, z, roll, pitch, yaw]` + 当前夹爪状态 |
+| `action` | float32 | (8,) | 本帧下发的 7 个目标关节角 + 夹爪命令（0=张开，1=闭合） |
 | `obj_init` | float32 | (6,) | 杯子初始位置(3) + 盘子初始位置(3)，仅记录，不参与训练 |
 
 **语言条件数据集**（`./demo_data_language`，`repo_id="franka_pnp_language"`）：
@@ -356,8 +356,8 @@ pip install opencv-python
 |------|------|------|------|
 | `observation.image` | image | (256, 256, 3) | 智能体视角相机图 |
 | `observation.wrist_image` | image | (256, 256, 3) | 腕部相机图 |
-| `observation.state` | float32 | (7,) | 7 个关节角度（注意：这里不是末端位姿，而是关节角） |
-| `action` | float32 | (8,) | 7 个关节角 + 1 个夹爪开合 |
+| `observation.state` | float32 | (8,) | 7 个当前实际关节角 + 当前夹爪状态 |
+| `action` | float32 | (8,) | 本帧下发的 7 个目标关节角 + 夹爪命令 |
 | `obj_init` | float32 | (9,) | 红杯(3) + 蓝杯(3) + 盘子(3) 的初始位置，仅记录 |
 | `task` | str | — | 自然语言指令，如 `"Place the red mug on the plate."`，每回合随机在红/蓝之间挑一个 |
 
@@ -383,6 +383,8 @@ demo_data/
 >
 > 下载方式：`git clone https://huggingface.co/datasets/a3124371940/franka_pnp`（语言版把仓库名换成 `franka_pnp_language`），再把对应脚本里的 `root` 指向下载下来的目录即可。
 > 注意：Hugging Face 上流传的 `Jeongeun/omy_pnp*` 系列是给旧版 6 自由度 OMY 机械臂采的，动作维度是 7（Franka 是 8），**不能直接使用**。采集新数据后可用 `push_dataset_il.py` / `push_dataset_language.py` 上传。
+>
+> **数据格式修复提示**：旧版采集器曾把“动作下发前的当前关节位置”误写成 `action`，并且状态里没有夹爪命令。修复后的 IL/VLA 状态分别为 7/8 维，旧数据和旧检查点仅供回放验证，不能和新数据混合训练。请覆盖重采并重新训练；`auto_collect.py` 会拒绝向旧结构数据集继续追加。
 
 ### 3. 动作空间与状态空间
 
@@ -394,7 +396,7 @@ demo_data/
   - `delta_joint_angle`：动作是关节角增量 + 夹爪。
 - **`state_type`**：`joint_angle`（关节角）、`ee_pose`（末端位姿）或 `delta_q`（关节角增量）。
 
-> 采集时人通过键盘控制"末端往哪个方向移动一点"（`eef_pose` 增量），但**存进数据集 / 喂给策略学习的 `action` 是 8 维的"7 关节角 + 夹爪"**——也就是 IK 解算后的关节空间指令。这样策略学到的是直接可执行的关节目标。
+> 采集时人通过键盘控制"末端往哪个方向移动一点"（`eef_pose` 增量），但**存进数据集 / 喂给策略学习的 `action` 是 8 维的“7 个目标关节角 + 夹爪命令”**——也就是当前观测之后由 IK 真正下发的关节空间指令，而不是动作执行前的当前关节状态。
 
 > **夹爪语义**：对外（数据集、策略）统一用 `0=张开，1=闭合`；仿真内部 MuJoCo 的执行器控制量是 `255=张开，0=闭合`（tendon 驱动两指联动），由 `SimpleEnv.step()` 内部做换算，写代码时只需要关心对外的 0/1 语义。
 
@@ -567,6 +569,8 @@ python auto_collect.py
 - `AUTO_EXISTING_DATASET_ACTION`：目标数据集已存在时怎么处理。默认 `"ask"`，运行时会让你选：继续追加 / 删除重采 / 退出。
 - `AUTO_FORCE`：命令行强制覆盖开关，默认 `False`，一般不用改。
 - `AUTO_HEADLESS`：服务器无桌面设为 `True`；本地想看窗口保持 `False`。
+- `AUTO_GL_BACKEND`：默认 `"auto"`，自动选择 Windows/WGL、Linux/EGL、macOS/CGL；通常不用改。
+- `AUTO_EGL_DEVICE_ID`：Linux 多 GPU 服务器只有 EGL 选错显卡时才填写，通常保持 `None`。
 - `AUTO_VIDEO_DIR`：保存检查视频；设为 `None` 就不保存。
 - `AUTO_IMAGE_WRITER_THREADS`：图片写入线程数。默认 `2` 更省内存；想更快可改 `4/8`，但长时间采集更容易吃内存。
 - `AUTO_GRASP_X_OFFSET`：抓取点相对杯子中心的 x 偏移；这个场景通常只需要调它，常试 `0.04 / 0.06 / 0.07`，方向反了就改成负数。
@@ -581,6 +585,8 @@ python auto_collect.py
 ```
 
 选择同一个模式后，当它提示数据集目录已存在，输入 `1` 选择“继续采集”，脚本会读取已有 episode 数，不覆盖旧数据，并继续补到 `AUTO_NUM_DEMOS`。
+
+> 如果目录是修复前生成的旧版 6/7 维状态数据，脚本会明确报错并要求选择 `2` 删除重采。旧 action 标签的时间语义错误，不能通过简单追加修好。
 
 ### 步骤 2：回放与可视化数据（`visualize_data_il.py`）
 
@@ -606,7 +612,7 @@ python il/train_il.py --config_path=config/il/diffusion_franka.yaml
 
 - ACT：`chunk_size=10`、`n_action_steps=10`。
 - Diffusion：`n_obs_steps=2`、`horizon=16`、`n_action_steps=8`，用条件 1D U-Net 逐步去噪生成动作序列。
-- 检查点分别保存到 `./ckpt/act_franka` 和 `./ckpt/diffusion_franka`。
+- 检查点分别保存到 `./ckpt/act_franka_v2` 和 `./ckpt/diffusion_franka`。ACT 的 `_v2` 用于隔离修复 action/state 后重新训练的模型。
 
 ### 步骤 4：部署 IL 策略（`deploy_il.py`）
 
@@ -620,7 +626,7 @@ python il/deploy_il.py --config_path=config/il/diffusion_franka.yaml
 无桌面 Linux 服务器可直接离屏运行并保存 MP4（MP3 只能保存音频，不能保存画面）：
 
 ```bash
-CUDA_VISIBLE_DEVICES=7 python il/deploy_il.py --config_path=config/il/act_franka.yaml --checkpoint=./ckpt/act_franka/checkpoints/020000/pretrained_model --device=cuda --seed=0 --max_steps=2000 --headless
+CUDA_VISIBLE_DEVICES=7 python il/deploy_il.py --config_path=config/il/act_franka.yaml --checkpoint=./ckpt/act_franka_v2/checkpoints/050000/pretrained_model --device=cuda --seed=0 --max_steps=2000 --headless
 ```
 
 无头模式不会创建 GLFW 窗口，默认以 `400×300` 分辨率分别渲染主相机和腕部相机，再横向合成为视频。`--max_steps` 在无头模式下必须大于 0；视频按 `--control_hz`（默认 20 FPS）写入。默认输出会按模型分文件夹保存，例如 ACT 是 `output/act/act_seed0.mp4`，Diffusion 是 `output/diffusion/diffusion_seed0.mp4`，汇总文件也在对应文件夹中，例如 `output/act/act_summary.json`。添加 `--random_seeds=0` 可只跑首轮；需要降低渲染开销时可添加 `--render_width=320 --render_height=240`。如果想指定其它路径，仍可添加 `--video=自定义路径.mp4`。
@@ -661,7 +667,7 @@ python vla/visualize_data_language.py   # 需要显示器；默认读取 ./demo_
 **训练（GPU 机）：**
 
 ```bash
-python vla/train_vla.py --config_path=config/vla/pi0_franka.yaml   # 训练 π0，检查点存到 ./ckpt/pi0_franka
+python vla/train_vla.py --config_path=config/vla/pi0_franka.yaml   # 训练 π0，检查点存到 ./ckpt/pi0_franka_v2
 ```
 
 > 首次运行会自动从 Hugging Face 下载 π0 预训练权重 `lerobot/pi0`（需联网，体积较大）。训练前请确认配置文件里 `dataset.root` 指向的数据集已存在（自己采集的 `./demo_data_language`）。
@@ -679,7 +685,7 @@ python vla/deploy_vla.py --config_path=config/vla/pi0_franka.yaml
 **训练（GPU 机）：**
 
 ```bash
-python vla/train_vla.py --config_path=config/vla/smolvla_franka.yaml   # 训练 SmolVLA，检查点存到 ./ckpt/smolvla_franka
+python vla/train_vla.py --config_path=config/vla/smolvla_franka.yaml   # 训练 SmolVLA，检查点存到 ./ckpt/smolvla_franka_v2
 ```
 
 > 首次运行会自动下载 SmolVLA 基座权重 `lerobot/smolvla_base`（需联网）。
@@ -696,10 +702,10 @@ python vla/deploy_vla.py --config_path=config/vla/smolvla_franka.yaml
 
 ```bash
 # π0
-CUDA_VISIBLE_DEVICES=7 python vla/deploy_vla.py --config_path=config/vla/pi0_franka.yaml --checkpoint=./ckpt/pi0_franka/checkpoints/020000/pretrained_model --device=cuda --seed=0 --max_steps=2000 --headless
+CUDA_VISIBLE_DEVICES=7 python vla/deploy_vla.py --config_path=config/vla/pi0_franka.yaml --checkpoint=./ckpt/pi0_franka_v2/checkpoints/040000/pretrained_model --device=cuda --seed=0 --max_steps=2000 --headless
 
 # SmolVLA
-CUDA_VISIBLE_DEVICES=7 python vla/deploy_vla.py --config_path=config/vla/smolvla_franka.yaml --checkpoint=./ckpt/smolvla_franka/checkpoints/020000/pretrained_model --device=cuda --seed=0 --max_steps=2000 --headless
+CUDA_VISIBLE_DEVICES=7 python vla/deploy_vla.py --config_path=config/vla/smolvla_franka.yaml --checkpoint=./ckpt/smolvla_franka_v2/checkpoints/030000/pretrained_model --device=cuda --seed=0 --max_steps=2000 --headless
 ```
 
 首轮成功后会自动再跑 10 个随机种子。每段视频顶部包含当前语言指令，视频默认保存到 `output/pi0/` 或 `output/smolvla/`，最终生成同目录下的 `pi0_summary.json` / `smolvla_summary.json`，记录每个 seed、指令、步数、视频路径和总成功率。若只想固定测试红杯，可添加 `--instruction="Place the red mug on the plate."`；蓝杯同理。
@@ -712,7 +718,7 @@ CUDA_VISIBLE_DEVICES=7 python vla/deploy_vla.py --config_path=config/vla/smolvla
 - `train(cfg)`：校验配置 → 初始化 wandb / 随机种子 / 设备 → 创建数据集、（可选）评估环境、策略、优化器与调度器 → 构建 DataLoader → 进入**离线训练主循环**：取 batch → 搬到 GPU → `update_policy` 前向+反向+优化 → 按频率记录日志、保存检查点、（可选）评估。`cfg.policy.type` 为 `"pi0"` / `"smolvla"` 时会分别自动把 `pretrained_path` 设成 `lerobot/pi0` / `lerobot/smolvla_base` 这两个官方基座权重。
 - `update_policy(...)`：单步更新。可选混合精度（AMP）下前向算 loss → 反向传播 → **先反缩放梯度再做梯度裁剪** → `grad_scaler` 执行优化器步进并更新缩放因子 → 清零梯度 → 推进学习率调度器 → 对支持的策略更新内部缓冲（如 EMA）→ 返回训练指标。
 
-检查点默认存到 `output_dir`（如 `./ckpt/pi0_franka`）。
+检查点默认存到 `output_dir`（如 `./ckpt/pi0_franka_v2`）。
 
 ### 数据集/策略上传到 Hugging Face（`push_dataset_il.py` / `push_dataset_language.py`）
 
@@ -735,7 +741,7 @@ hf auth login
 python push_ckpt.py
 ```
 
-脚本默认把整个 `./ckpt` 增量上传到当前 Hugging Face 账号下的私有模型仓库 `franka_ckpt`，远端保留 `ckpt/act_franka/...`、`ckpt/diffusion_franka/...` 等完整目录结构。再次运行时只同步新增或内容发生变化的文件；缓存目录以及指向数字检查点的 `checkpoints/last` 重复链接不会上传。
+脚本默认把整个 `./ckpt` 增量上传到当前 Hugging Face 账号下的私有模型仓库 `franka_ckpt`，远端保留 `ckpt/act_franka_v2/...`、`ckpt/pi0_franka_v2/...` 等完整目录结构。再次运行时只同步新增或内容发生变化的文件；缓存目录以及指向数字检查点的 `checkpoints/last` 重复链接不会上传。
 
 自定义仓库名或改为公开仓库时使用：
 
@@ -752,7 +758,7 @@ hf auth login
 hf download a3124371940/franka_ckpt --local-dir ./hf_ckpt
 ```
 
-下载后会保留上传时的完整目录结构，例如 ACT 模型位于 `./hf_ckpt/ckpt/act_franka/checkpoints/020000/pretrained_model`。如果检查点编号不同，可以查找实际路径：
+下载后会保留上传时的完整目录结构，例如 ACT 模型位于 `./hf_ckpt/ckpt/act_franka_v2/checkpoints/050000/pretrained_model`。如果检查点编号不同，可以查找实际路径：
 
 ```bash
 # Linux
@@ -765,7 +771,7 @@ Get-ChildItem -Path ./hf_ckpt -Recurse -Directory -Filter pretrained_model
 使用 CPU 部署下载的 ACT 模型：
 
 ```bash
-python il/deploy_il.py --config_path=config/il/act_franka.yaml --checkpoint=./hf_ckpt/ckpt/act_franka/checkpoints/020000/pretrained_model --device=cpu --seed=0 --max_steps=2000
+python il/deploy_il.py --config_path=config/il/act_franka.yaml --checkpoint=./hf_ckpt/ckpt/act_franka_v2/checkpoints/050000/pretrained_model --device=cpu --seed=0 --max_steps=2000
 ```
 
 ---
@@ -820,6 +826,16 @@ python il/deploy_il.py --config_path=config/il/act_franka.yaml --checkpoint=./hf
 
 `config/il/act_franka.yaml` / `config/il/diffusion_franka.yaml` 供 `train_il.py` 和 `deploy_il.py` 共用；`config/vla/pi0_franka.yaml` / `config/vla/smolvla_franka.yaml` 供 `train_vla.py` 读取。训练时都通过 `--config_path` 指定，公共字段含义：
 
+修复数据标签后的推荐配置如下（本轮不调整 Diffusion Policy）：
+
+| 模型 | 预测长度 | 每次执行 | 每卡 batch | 训练步数 | 检查点目录 |
+|---|---:|---:|---:|---:|---|
+| ACT | 50 | 10 | 16 | 50,000 | `ckpt/act_franka_v2` |
+| π0 | 50 | 50 | 8 | 40,000 | `ckpt/pi0_franka_v2` |
+| SmolVLA | 50 | 10 | 16 | 30,000 | `ckpt/smolvla_franka_v2` |
+
+> `batch_size` 是每张 GPU 的 batch；例如 π0 使用 3 张卡时全局 batch 为 24。当前锁定的 LeRobot π0 实现要求 `n_action_steps == chunk_size`，训练入口已经加入明确校验；ACT/SmolVLA 可以预测 50 步但只执行 10 步后重规划。三个模型都每 5,000 步保存一次，建议用同一组随机种子比较中间检查点的成功率。
+
 ```yaml
 dataset:
   repo_id: franka_pnp               # 数据集仓库 ID
@@ -827,22 +843,23 @@ dataset:
 policy:
   type: act                         # act / diffusion / pi0 / smolvla
   device: cuda
-  chunk_size: 10                    # ACT 参数；Diffusion 改用 horizon / n_obs_steps
+  chunk_size: 50                    # 预测 50 步动作；Diffusion 改用 horizon / n_obs_steps
   n_action_steps: 10
-output_dir: ./ckpt/act_franka       # 检查点保存目录
+output_dir: ./ckpt/act_franka_v2    # 修复后模型与旧检查点隔离
 batch_size: 16
-job_name: act_franka
+job_name: act_franka_v2
 resume: false                       # 是否从已有检查点续训
 seed: 42
 num_workers: 0                      # Windows 下建议 0
-steps: 20_000                       # 训练总步数
+steps: 50_000                       # ACT 优化后的训练总步数
 eval_freq: -1                       # -1 表示训练中不评估
 log_freq: 50                        # 每 50 步记录一次日志
-save_freq: 10_000                   # 每 10000 步存一次检查点
+save_freq: 5_000                    # 每 5000 步存一次，方便按成功率选模型
 use_policy_training_preset: true    # 使用策略自带的训练预设（优化器/调度器等）
 wandb:
-  enable: false                     # 需要在线看板时再改 true
+  enable: true
   project: act_franka
+  entity: null                      # 使用当前临时登录的 W&B 账号
   disable_artifact: true
 ```
 
@@ -856,7 +873,7 @@ wandb:
 A：DataLoader 多进程无法序列化 lambda。把 `num_workers` 设为 `0`（YAML 里改 `num_workers: 0`，或脚本里 DataLoader 的 `num_workers=0`）。
 
 **Q2：MuJoCo 窗口打不开 / 远程服务器报 GLFW 错误？**
-A：遥操作与带渲染窗口的脚本需要图形界面。纯命令行服务器适合 `train_il.py` / `train_vla.py` 训练和上传脚本。
+A：遥操作与带窗口脚本需要图形界面；自动采集和部署请加 `--headless`。脚本会先执行相机预检并打印实际 GL 后端。Linux/NVIDIA 默认 EGL；若报 `EGL_NOT_INITIALIZED`，先检查 NVIDIA 驱动/EGL，CPU 服务器可执行 `sudo apt install libosmesa6` 后增加 `--gl_backend=osmesa`。Windows 不应强制 EGL，保持默认 `--gl_backend=auto`，脚本会使用 WGL。
 
 **Q3：Windows 上运行 `visualize_*.py` 报 `RuntimeError: An attempt has been made to start a new process before the current process has finished its bootstrapping phase`？**
 A：这是 DataLoader `num_workers>0` 在 Windows 下用 `spawn` 方式起子进程、子进程重新执行整个脚本导致的。本仓库的可视化脚本已经把 `num_workers` 设为 `0`，如果你自己改动过这个参数改回 `0` 即可。

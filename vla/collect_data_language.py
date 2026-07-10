@@ -135,8 +135,8 @@ PnPEnv = SimpleEnv2(xml_path, seed = SEED, state_type = 'joint_angle')
 #     },
 #     "observation.state": {
 #         "dtype": "float32",
-#         "shape": (7,),
-#         "names": ["state"], # 7 个关节角度
+#         "shape": (8,),
+#         "names": ["state"], # 7 个关节角度 + 当前夹爪状态
 #     },
 #     "action": {
 #         "dtype": "float32",
@@ -205,8 +205,8 @@ if create_new:
                     },
                     "observation.state": {
                         "dtype": "float32",
-                        "shape": (7,),
-                        "names": ["state"], # x, y, z, roll, pitch, yaw
+                        "shape": (8,),
+                        "names": ["state"], # 7 个关节角度 + 当前夹爪状态
                     },
                     "action": {
                         "dtype": "float32",
@@ -339,8 +339,11 @@ while PnPEnv.env.is_viewer_alive() and episode_id < NUM_DEMO:
         wrist_image = wrist_image.resize((256, 256))    # 缩放手腕相机画面
         agent_image = np.array(agent_image)             # 再转回 numpy 数组
         wrist_image = np.array(wrist_image)
-        joint_q = PnPEnv.step(action)       # 7 个关节角 + 归一化夹爪命令（0=张开，1=闭合）
-        action = joint_q.astype(np.float32) # 数据集和部署共用同一套夹爪语义，不再存底层 0/255 控制量
+        # 观测来自动作下发前；状态包含 7 个实际关节角和当前夹爪命令。
+        robot_state = PnPEnv.get_joint_state().astype(np.float32)
+        # step() 返回当前状态，动作监督必须改用真正下发的目标命令。
+        PnPEnv.step(action)
+        command_action = PnPEnv.get_command_action().astype(np.float32)
         if record_flag:
             # 只有在记录开关打开后，才把这一帧写入数据集。
             # 将该帧添加到数据集
@@ -353,8 +356,8 @@ while PnPEnv.env.is_viewer_alive() and episode_id < NUM_DEMO:
             dataset.add_frame( {
                     "observation.image": agent_image,           # 主相机画面
                     "observation.wrist_image": wrist_image,     # 手腕相机画面
-                    "observation.state": joint_q[:7],           # 机器人状态（7 个关节角度）
-                    "action": action,                           # 这一帧的动作（7 关节 + 1 夹爪）
+                    "observation.state": robot_state,           # 7 个实际关节角 + 当前夹爪状态
+                    "action": command_action,                   # 7 个目标关节角 + 1 个夹爪命令
                     "obj_init": PnPEnv.obj_init_pose,           # 物体初始位置（仅记录，训练不用）
                     # "task": PnPEnv.instruction,               # 指令不在这里传，而是用下面的 task= 参数传
                 }, task = PnPEnv.instruction                    # ← 把自然语言指令作为本帧的任务标签存入
