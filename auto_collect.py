@@ -46,7 +46,7 @@ from headless_gl import configure_headless_gl, option_from_argv, render_diagnost
 AUTO_MODE = "ask"
 
 # 想成功保存多少条 episode。调试专家轨迹时建议 3~5，正式采集再改成 50/100。
-AUTO_NUM_DEMOS = 100
+AUTO_NUM_DEMOS = 200
 
 # 数据保存目录。
 #   None：根据模式自动使用 ./demo_data 或 ./demo_data_language，直接覆盖/生成训练用数据。
