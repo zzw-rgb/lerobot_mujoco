@@ -3,8 +3,8 @@ dataset:
   root: ./demo_data_language # 本地数据集根目录
 policy:
   type : smolvla            # 策略类型：smolvla
-  chunk_size: 5             # 动作块大小（一次预测的动作步数）
-  n_action_steps: 5         # 执行时一次推理走几步
+  chunk_size: 50            # 动作块大小；对齐 SmolVLA 预训练（原 5 太小，用不上预训练动作先验）
+  n_action_steps: 50        # 执行时一次推理走几步
   device: cuda              # 训练设备（使用 GPU）
 
 save_checkpoint: true
