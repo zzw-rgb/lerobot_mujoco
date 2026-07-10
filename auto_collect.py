@@ -12,7 +12,7 @@
 
 常用命令：
 
-    # 平时直接运行即可；启动后选择 il / vla
+    # 平时直接运行即可；启动后选择是否无头运行以及 il / vla
     python auto_collect.py
 
     # 命令行参数仍然保留，临时覆盖配置时可以用
@@ -67,8 +67,11 @@ AUTO_FORCE = False
 # True 表示在已有数据集后面追加；不能和 AUTO_FORCE 同时为 True。
 AUTO_APPEND = False
 
-# 服务器无桌面改成 True；本地想看 MuJoCo 窗口就保持 False。
-AUTO_HEADLESS = False
+# 运行时是否询问无头模式：
+#   "ask" = 每次直接运行脚本时询问（推荐）
+#   True  = 始终无头运行，不显示 MuJoCo 窗口
+#   False = 始终显示 MuJoCo 窗口
+AUTO_HEADLESS = "ask"
 
 # "auto" 会按系统选择：Windows=WGL、Linux=EGL、macOS=CGL。
 # Linux 没有可用的 NVIDIA EGL 时可改为 "osmesa"（需要系统安装 libosmesa6）。
@@ -119,7 +122,42 @@ AUTO_HOVER_Z = 1.05              # 搬运时抬起高度
 AUTO_INSTRUCTION = None
 
 
-if "--headless" in sys.argv or (AUTO_HEADLESS and "--no_headless" not in sys.argv and "--no-headless" not in sys.argv):
+def choose_headless_before_imports() -> bool:
+    """在导入 MuJoCo/LeRobot 前确定渲染模式，保证 GL 后端能够生效。"""
+    if "--headless" in sys.argv:
+        return True
+    if "--no_headless" in sys.argv or "--no-headless" in sys.argv:
+        return False
+
+    configured = AUTO_HEADLESS
+    if isinstance(configured, bool):
+        return configured
+    if str(configured).strip().lower() != "ask":
+        raise ValueError('AUTO_HEADLESS must be "ask", True, or False.')
+
+    # 被其他 Python 文件 import 或只查看 --help 时不能弹出交互问题。
+    if __name__ != "__main__" or "--help" in sys.argv or "-h" in sys.argv:
+        return False
+
+    print("\n请选择采集显示模式：")
+    print("  1) 无头模式：不显示窗口，适合服务器或长时间采集（推荐）")
+    print("  2) 窗口模式：显示 MuJoCo 画面，适合观察专家轨迹")
+    while True:
+        try:
+            choice = input("请输入 1/2（直接回车默认 1）：").strip().lower()
+        except EOFError:
+            print("未检测到交互终端，自动使用无头模式。")
+            return True
+        if choice in {"", "1", "y", "yes", "headless"}:
+            return True
+        if choice in {"2", "n", "no", "window", "gui"}:
+            return False
+        print("输入无效，请输入 1 或 2。")
+
+
+_DEFAULT_HEADLESS = choose_headless_before_imports()
+
+if _DEFAULT_HEADLESS:
     # 必须在导入 mujoco / OpenGL / 环境封装之前设置；这里不能用 setdefault，
     # 否则 shell 中遗留的 glfw/egl 会覆盖本次无头配置。
     _requested_gl_backend = option_from_argv(sys.argv, "--gl_backend", AUTO_GL_BACKEND)
@@ -180,7 +218,7 @@ def parse_args() -> argparse.Namespace:
         help="What to do when the dataset root already exists.",
     )
 
-    parser.add_argument("--headless", action=argparse.BooleanOptionalAction, default=AUTO_HEADLESS, help="Use platform-appropriate offscreen rendering without a viewer window.")
+    parser.add_argument("--headless", action=argparse.BooleanOptionalAction, default=_DEFAULT_HEADLESS, help="Use platform-appropriate offscreen rendering without a viewer window.")
     parser.add_argument("--no_headless", action="store_false", dest="headless", help=argparse.SUPPRESS)
     parser.add_argument(
         "--gl_backend",
