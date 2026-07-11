@@ -6,13 +6,13 @@
     python vla/deploy_vla.py --config_path=config/vla/pi0_franka.yaml
 
     # π0：无头部署，视频默认输出到 output/pi0/
-    CUDA_VISIBLE_DEVICES=7 python vla/deploy_vla.py --config_path=config/vla/pi0_franka.yaml --checkpoint=./ckpt/pi0_franka_v2/checkpoints/040000/pretrained_model --device=cuda --seed=0 --max_steps=2000 --headless
+    CUDA_VISIBLE_DEVICES=7 python vla/deploy_vla.py --config_path=config/vla/pi0_franka.yaml --checkpoint=./ckpt/pi0_franka/checkpoints/040000/pretrained_model --device=cuda --seed=0 --max_steps=2000 --headless
 
     # SmolVLA：窗口部署
     python vla/deploy_vla.py --config_path=config/vla/smolvla_franka.yaml
 
     # SmolVLA：无头部署，视频默认输出到 output/smolvla/
-    CUDA_VISIBLE_DEVICES=7 python vla/deploy_vla.py --config_path=config/vla/smolvla_franka.yaml --checkpoint=./ckpt/smolvla_franka_v2/checkpoints/030000/pretrained_model --device=cuda --seed=0 --max_steps=2000 --headless
+    CUDA_VISIBLE_DEVICES=7 python vla/deploy_vla.py --config_path=config/vla/smolvla_franka.yaml --checkpoint=./ckpt/smolvla_franka/checkpoints/030000/pretrained_model --device=cuda --seed=0 --max_steps=2000 --headless
 """
 
 from __future__ import annotations

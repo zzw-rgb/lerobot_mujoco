@@ -13,9 +13,9 @@ policy:
   scheduler_decay_steps: 40_000
 
 save_checkpoint: true
-output_dir: ./ckpt/pi0_franka_v2
+output_dir: ./ckpt/pi0_franka
 batch_size: 8              # 每张 GPU 的 batch；3 卡训练时全局 batch=24
-job_name: pi0_franka_v2
+job_name: pi0_franka
 resume: false
 seed: 42
 num_workers: 8             # 遇到 DataLoader/pickling 问题可设为 0

@@ -11,8 +11,8 @@ policy:
   n_action_steps: 10
   temporal_ensemble_coeff: null  # 保持关闭；启用时 n_action_steps 必须为 1，推理会更慢
 
-output_dir: ./ckpt/act_franka_v2  # 新状态/action 结构，和旧错误检查点分开
-job_name: act_franka_v2
+output_dir: ./ckpt/act_franka  # 新状态/action 结构，和旧错误检查点分开
+job_name: act_franka
 resume: false
 seed: 42
 num_workers: 0

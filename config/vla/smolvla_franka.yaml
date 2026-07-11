@@ -12,9 +12,9 @@ policy:
   scheduler_decay_steps: 30_000
 
 save_checkpoint: true
-output_dir: ./ckpt/smolvla_franka_v2
+output_dir: ./ckpt/smolvla_franka
 batch_size: 16             # 每张 GPU 的 batch；3 卡训练时全局 batch=48
-job_name: smolvla_franka_v2
+job_name: smolvla_franka
 resume: false
 seed: 42
 num_workers: 8             # 遇到 DataLoader/pickling 问题可设为 0

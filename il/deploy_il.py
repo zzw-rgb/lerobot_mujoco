@@ -7,7 +7,7 @@
     python il/deploy_il.py --config_path=config/il/act_franka.yaml
 
     # ACT：无头部署，视频默认输出到 output/act/
-    CUDA_VISIBLE_DEVICES=7 python il/deploy_il.py --config_path=config/il/act_franka.yaml --checkpoint=./ckpt/act_franka_v2/checkpoints/050000/pretrained_model --device=cuda --seed=0 --max_steps=2000 --headless
+    CUDA_VISIBLE_DEVICES=7 python il/deploy_il.py --config_path=config/il/act_franka.yaml --checkpoint=./ckpt/act_franka/checkpoints/050000/pretrained_model --device=cuda --seed=0 --max_steps=2000 --headless
 
     # Diffusion Policy：窗口部署
     python il/deploy_il.py --config_path=config/il/diffusion_franka.yaml
