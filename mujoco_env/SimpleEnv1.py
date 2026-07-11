@@ -266,7 +266,7 @@ class SimpleEnv:
         获取机器人的关节状态
         返回:
             q: np.array, 机器人的关节角 + 夹爪状态 (0 表示张开, 1 表示闭合)
-            [j1,j2,j3,j4,j5,j6,gripper]
+            [j1,j2,j3,j4,j5,j6,j7,gripper]
         '''
         qpos = self.env.get_qpos_joints(joint_names=self.joint_names)
         # 夹住物体时手指无法完全合拢，不能用指缝大小反推开合命令。

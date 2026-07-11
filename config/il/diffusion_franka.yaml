@@ -12,7 +12,9 @@ policy:
   crop_is_random: true
   vision_backbone: resnet18
   pretrained_backbone_weights: ResNet18_Weights.IMAGENET1K_V1
-  use_group_norm: false          # Keep BatchNorm when loading ImageNet pretrained weights.
+  # Diffusion Policy 官方结构使用 GroupNorm；小 batch 和连续时序下比 BatchNorm 稳定。
+  # ResNet 卷积层仍会加载 ImageNet 预训练权重。
+  use_group_norm: true
   down_dims: [256, 512, 1024]
   num_train_timesteps: 100
   num_inference_steps: 10
@@ -27,7 +29,7 @@ steps: 20_000
 eval_freq: -1
 log_freq: 50
 save_checkpoint: true
-save_freq: 10_000
+save_freq: 5_000
 use_policy_training_preset: true
 
 wandb:

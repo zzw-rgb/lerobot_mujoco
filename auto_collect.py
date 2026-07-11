@@ -35,6 +35,12 @@ from pathlib import Path
 from headless_gl import configure_headless_gl, option_from_argv, render_diagnostics
 
 
+# Windows 中文终端可能仍使用 GBK；采集进度包含 ✓/✗，统一为 UTF-8 避免保存后打印崩溃。
+for stream in (sys.stdout, sys.stderr):
+    if hasattr(stream, "reconfigure"):
+        stream.reconfigure(encoding="utf-8", errors="replace")
+
+
 # =============================================================================
 # 用户配置区：日常只改这里，然后直接运行 python auto_collect.py
 # =============================================================================
@@ -111,8 +117,8 @@ AUTO_MAX_NEAR_BLACK_RATIO = 0.5
 AUTO_MAX_CONSECUTIVE_BLACK = 3
 
 # 专家轨迹参数：抓不住主要调这几个。
-AUTO_GRASP_X_OFFSET = 0.0        # 抓取点相对杯子中心的 x 偏移；方向反了就改成 -0.060
-AUTO_GRASP_Y_OFFSET = 0.050      # 抓取点相对杯子中心的 y 偏移；这个场景通常保持 0
+AUTO_GRASP_X_OFFSET = 0.0        # 当前场景保持 0；实测 ±0.05 都无法稳定完成 seed=0
+AUTO_GRASP_Y_OFFSET = 0.050      # 世界坐标 y 正方向对应杯子无把手侧；seed=0 已实测成功
 AUTO_GRASP_Z_OFFSET = 0.022      # 下探高度；还高就试 0.0，太低碰撞就试 0.02
 AUTO_PLACE_Z_OFFSET = 0.065      # 放到盘子上方的高度
 AUTO_HOVER_Z = 1.05              # 搬运时抬起高度
@@ -323,12 +329,14 @@ def load_dataset_info(root: Path) -> dict:
 
 
 def expected_state_shape(mode: str) -> tuple[int]:
-    """新数据统一把夹爪命令放进本体状态。"""
-    return (7,) if mode == "il" else (8,)
+    """IL/VLA 统一保存 7 个实际关节角和夹爪命令。"""
+    if mode not in DEFAULTS:
+        raise ValueError(f"Unsupported dataset mode: {mode!r}")
+    return (8,)
 
 
 def validate_existing_dataset_schema(root: Path, mode: str) -> None:
-    """阻止把修复后的帧追加到旧版 6/7 维状态数据集中。"""
+    """阻止把关节状态帧追加到旧版末端位姿数据集中。"""
     info = load_dataset_info(root)
     state_feature = info.get("features", {}).get("observation.state", {})
     actual_shape = tuple(state_feature.get("shape", ()))
@@ -336,8 +344,9 @@ def validate_existing_dataset_schema(root: Path, mode: str) -> None:
     if actual_shape and actual_shape != expected_shape:
         raise ValueError(
             "现有数据集使用旧版 observation.state 结构："
-            f"{actual_shape}，修复后的 {mode.upper()} 数据需要 {expected_shape}（包含夹爪状态）。\n"
-            "旧数据的 action 还存在时间对齐错误，不能继续追加。"
+            f"{actual_shape}，新版 {mode.upper()} 数据需要 {expected_shape}"
+            "（7 个实际关节角 + 夹爪命令）。\n"
+            "旧数据只有末端位姿，无法可靠恢复每帧实际关节状态，不能继续追加。"
             "请重新运行并选择“删除重采”，或使用 --force 覆盖旧数据集。"
         )
 
@@ -761,9 +770,9 @@ def get_target_body(env, mode: str) -> str:
 def infer_grasp_offset(env, target_body: str, p_mug: np.ndarray, args: argparse.Namespace) -> np.ndarray:
     """Return the TCP xy offset used to grasp the mug side.
 
-    The current mug only needs a world-frame x offset. Keeping x/y independent
-    makes the expert easier to tune from the config block at the top of this
-    file.
+    In this scene the handle-free side is reached with a positive world-frame
+    y offset. Keeping x/y independent makes the expert easier to tune from the
+    config block at the top of this file.
     """
     _ = (env, target_body, p_mug)
     return np.array([args.grasp_x_offset, args.grasp_y_offset], dtype=np.float64)
@@ -832,14 +841,9 @@ def record_frame(
     agent_256 = resize_image(agent_image)
     wrist_256 = resize_image(wrist_image)
 
-    # observation 必须来自下发动作之前的时刻；夹爪状态也属于本体状态，否则
-    # 抓取前后画面相似时，模型无法判断当前究竟是张开还是闭合。
-    if args.mode == "il":
-        observation_state = np.concatenate(
-            [env.get_ee_pose(), np.array([env.gripper_command], dtype=np.float32)]
-        ).astype(np.float32)
-    else:
-        observation_state = env.get_joint_state().astype(np.float32)
+    # observation 必须来自下发动作之前的时刻。IL/VLA 统一使用 7 个实际关节角
+    # + 夹爪命令：它与绝对关节 action 处于同一空间，也不会出现欧拉角 ±pi 跳变。
+    observation_state = env.get_joint_state().astype(np.float32)
 
     # step() 返回的是当前实际状态，不是动作标签。真正的监督目标是 IK/控制器
     # 本帧下发的绝对关节目标 + 归一化夹爪命令。

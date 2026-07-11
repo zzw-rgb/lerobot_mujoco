@@ -7,7 +7,7 @@
     python il/deploy_il.py --config_path=config/il/act_franka.yaml
 
     # ACT：无头部署，视频默认输出到 output/act/
-    CUDA_VISIBLE_DEVICES=7 python il/deploy_il.py --config_path=config/il/act_franka.yaml --checkpoint=./ckpt/act_franka/checkpoints/050000/pretrained_model --device=cuda --seed=0 --max_steps=2000 --headless
+    CUDA_VISIBLE_DEVICES=7 python il/deploy_il.py --config_path=config/il/act_franka.yaml --checkpoint=./ckpt/act_franka/checkpoints/020000/pretrained_model --device=cuda --seed=0 --max_steps=2000 --headless
 
     # Diffusion Policy：窗口部署
     python il/deploy_il.py --config_path=config/il/diffusion_franka.yaml
@@ -17,7 +17,7 @@
 
 脚本会从 ``output_dir/checkpoints/last/pretrained_model`` 加载最新检查点，
 并根据检查点中的 ``input_features`` 自动决定使用主相机、腕部相机
-和末端位姿，不再在部署脚本里重复手写模型配置。
+和机器人本体状态，不再在部署脚本里重复手写模型配置。
 """
 
 from __future__ import annotations
@@ -156,18 +156,20 @@ def build_observation(policy, state: np.ndarray, agent_image: np.ndarray, wrist_
 
 
 def get_policy_state(policy, env) -> np.ndarray:
-    """按检查点期望维度生成状态，同时兼容旧版和修复后的 ACT。"""
+    """按检查点期望维度生成状态，兼容旧末端位姿和新关节状态模型。"""
     feature = policy.config.input_features.get("observation.state")
     if feature is None:
-        raise KeyError("ACT checkpoint does not define observation.state")
+        raise KeyError("IL checkpoint does not define observation.state")
     expected_dim = int(feature.shape[0])
     ee_pose = env.get_ee_pose().astype(np.float32)
     if expected_dim == 6:  # 旧检查点：仅末端位姿
         return ee_pose
-    if expected_dim == 7:  # 新检查点：末端位姿 + 当前夹爪状态
+    if expected_dim == 7:  # 旧版检查点：末端位姿 + 当前夹爪状态
         return np.concatenate(
             [ee_pose, np.array([env.gripper_command], dtype=np.float32)]
         ).astype(np.float32)
+    if expected_dim == 8:  # 当前检查点：7 个实际关节角 + 当前夹爪状态
+        return env.get_joint_state().astype(np.float32)
     raise ValueError(f"Unsupported ACT observation.state shape: {feature.shape}")
 
 
@@ -270,7 +272,7 @@ def main() -> None:
     if args.headless:
         default_video = Path("output") / requested_type / f"{requested_type}_seed{args.seed}.mp4"
         base_video = Path(args.video or default_video).expanduser().resolve()
-        print(f"Headless EGL mode: first video will be saved to {base_video}")
+        print(f"Headless mode: first video will be saved to {base_video}")
 
     results: list[EpisodeResult] = []
     try:

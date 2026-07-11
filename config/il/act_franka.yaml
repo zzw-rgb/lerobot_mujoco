@@ -5,19 +5,19 @@ dataset:
 policy:
   type: act
   device: cuda
-  # 在 20 Hz 数据上预测未来 2.5 秒，但只执行 0.5 秒就重新观察和规划。
-  # 比旧版 10/10 更能学习“接近-抓取-搬运”的连续趋势，同时避免长时间开环漂移。
+  # 在 20 Hz 数据上预测未来 2.5 秒；每帧重规划并对重叠动作块做时间集成。
+  # 这比一次开环执行 10 帧更适合抓取接触阶段，也能抑制关节目标抖动。
   chunk_size: 50
-  n_action_steps: 10
-  temporal_ensemble_coeff: null  # 保持关闭；启用时 n_action_steps 必须为 1，推理会更慢
+  n_action_steps: 1
+  temporal_ensemble_coeff: 0.01
 
-output_dir: ./ckpt/act_franka  # 新状态/action 结构，和旧错误检查点分开
+output_dir: ./ckpt/act_franka
 job_name: act_franka
 resume: false
 seed: 42
 num_workers: 0
 batch_size: 16
-steps: 50_000
+steps: 20_000
 eval_freq: -1  # 本项目使用 deploy_il.py 在固定随机种子上评估
 log_freq: 50
 save_checkpoint: true
