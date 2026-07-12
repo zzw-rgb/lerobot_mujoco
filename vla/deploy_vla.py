@@ -84,7 +84,7 @@ def parse_args() -> argparse.Namespace:
         "--random_seeds",
         type=int,
         default=10,
-        help="After the first headless success, evaluate this many additional random seeds; 0 disables it.",
+        help="In headless mode, evaluate this many additional random seeds after the first episode; 0 disables it.",
     )
     return parser.parse_args()
 
@@ -280,9 +280,11 @@ def main() -> None:
         first_video = video_path_for_seed(base_video, args.seed) if base_video else None
         first_result = run_episode(policy, env, args, args.seed, first_video)
         results.append(first_result)
-        if args.headless and first_result.success and args.random_seeds > 0:
+        # 无论首轮成败都继续评估随机种子：策略较弱时更需要真实成功率和多布局的失败视频，
+        # 只在首轮成功时才评估会让弱策略永远只有 0/1 的样本。想省时间就调小 --random_seeds。
+        if args.headless and args.random_seeds > 0:
             extra_seeds = sample_random_seeds(args.seed, args.random_seeds)
-            print(f"首轮成功，开始评估 {len(extra_seeds)} 个随机种子：{extra_seeds}")
+            print(f"继续评估 {len(extra_seeds)} 个随机种子：{extra_seeds}")
             for seed in extra_seeds:
                 results.append(run_episode(policy, env, args, seed, video_path_for_seed(base_video, seed)))
     finally:

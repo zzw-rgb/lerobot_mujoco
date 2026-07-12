@@ -28,7 +28,7 @@ ACT：
 ```bash
 python il/train_il.py --config_path=config/il/act_franka.yaml
 python il/deploy_il.py --config_path=config/il/act_franka.yaml
-CUDA_VISIBLE_DEVICES=7 python il/deploy_il.py --config_path=config/il/act_franka.yaml --checkpoint=./ckpt/act_franka/checkpoints/020000/pretrained_model --device=cuda --seed=0 --max_steps=2000 --headless
+CUDA_VISIBLE_DEVICES=7 python il/deploy_il.py --config_path=config/il/act_franka.yaml --checkpoint=./ckpt/act_franka/checkpoints/100000/pretrained_model --device=cuda --seed=0 --max_steps=2000 --headless
 ```
 
 Diffusion Policy：
@@ -36,7 +36,7 @@ Diffusion Policy：
 ```bash
 python il/train_il.py --config_path=config/il/diffusion_franka.yaml
 python il/deploy_il.py --config_path=config/il/diffusion_franka.yaml
-CUDA_VISIBLE_DEVICES=7 python il/deploy_il.py --config_path=config/il/diffusion_franka.yaml --checkpoint=./ckpt/diffusion_franka/checkpoints/020000/pretrained_model --device=cuda --seed=0 --max_steps=2000 --headless
+CUDA_VISIBLE_DEVICES=7 python il/deploy_il.py --config_path=config/il/diffusion_franka.yaml --checkpoint=./ckpt/diffusion_franka/checkpoints/100000/pretrained_model --device=cuda --seed=0 --max_steps=2000 --headless
 ```
 
 π0：
@@ -62,6 +62,10 @@ CUDA_VISIBLE_DEVICES=7 python vla/deploy_vla.py --config_path=config/vla/smolvla
 ### 路线 A：IL 模仿学习（推荐先跑通）
 
 ```bash
+# 0. 一致性自检：验证场景 XML、策略配置、已有数据集是否满足代码假设。
+#    改过机械臂/场景 XML 或 YAML 配置后，先跑这一步再采集/训练。
+python verify_setup.py
+
 # 1. 采集并检查无语言指令的示教数据
 python il/collect_data_il.py
 # 如果不想手动遥操作，也可以用自动专家采集；参数在 auto_collect.py 顶部改：
@@ -132,6 +136,7 @@ lerobot_mujoco/
 │   ├── visualize_data_il.py    #   步骤2：回放/可视化已采集数据
 │   ├── train_il.py             #   步骤3：根据 YAML 训练 ACT / Diffusion
 │   ├── deploy_il.py            #   步骤4：根据同一 YAML 自动部署
+│   ├── eval_offline_il.py      #   [排查] 离线开环评估：预测动作 vs 示教动作
 │   └── push_dataset_il.py      #   [可选] 上传示教数据集
 │
 ├── vla/                         # 【流水线二】语言条件 VLA（π0 / SmolVLA）全流程
@@ -153,6 +158,7 @@ lerobot_mujoco/
 ├── requirements.txt            # 依赖清单
 ├── push_ckpt.py                # 增量上传整个 ckpt 到 Hugging Face
 ├── auto_collect.py             # 自动专家采集 IL/VLA 数据（可无头运行）
+├── verify_setup.py             # 场景/配置/数据集一致性自检（改过 XML 或配置后先跑）
 │
 └── asset/                      # 仿真资源
     ├── franka_panda/           # Franka Panda 机械臂的 MJCF 模型与网格
@@ -614,7 +620,7 @@ python il/train_il.py --config_path=config/il/diffusion_franka.yaml
 
 - ACT：`chunk_size=50`、`n_action_steps=1`、`temporal_ensemble_coeff=0.01`，每帧闭环并对重叠动作块做时间集成。
 - Diffusion：`n_obs_steps=2`、`horizon=16`、`n_action_steps=8`，用条件 1D U-Net 逐步去噪生成动作序列。
-- 两者都训练 20,000 步，检查点保持原始目录名：`./ckpt/act_franka` 和 `./ckpt/diffusion_franka`。不要从旧 6/7 维检查点续训。
+- 两者都训练 100,000 步（每 10,000 步保存一个检查点），目录名：`./ckpt/act_franka` 和 `./ckpt/diffusion_franka`。不要从旧 6/7 维检查点续训。训练量说明：约 5 万帧数据下，20k 步 × batch 16 只相当于约 5~6 个 epoch，策略往往还远未拟合；loss 曲线走平不代表闭环成功率走平，建议用多个中间检查点分别跑 `deploy_il.py` 比较成功率。
 
 ### 步骤 4：部署 IL 策略（`deploy_il.py`）
 
@@ -628,10 +634,19 @@ python il/deploy_il.py --config_path=config/il/diffusion_franka.yaml
 无桌面 Linux 服务器可直接离屏运行并保存 MP4（MP3 只能保存音频，不能保存画面）：
 
 ```bash
-CUDA_VISIBLE_DEVICES=7 python il/deploy_il.py --config_path=config/il/act_franka.yaml --checkpoint=./ckpt/act_franka/checkpoints/020000/pretrained_model --device=cuda --seed=0 --max_steps=2000 --headless
+CUDA_VISIBLE_DEVICES=7 python il/deploy_il.py --config_path=config/il/act_franka.yaml --checkpoint=./ckpt/act_franka/checkpoints/100000/pretrained_model --device=cuda --seed=0 --max_steps=2000 --headless
 ```
 
-无头模式不会创建 GLFW 窗口，默认以 `400×300` 分辨率分别渲染主相机和腕部相机，再横向合成为视频。`--max_steps` 在无头模式下必须大于 0；视频按 `--control_hz`（默认 20 FPS）写入。默认输出会按模型分文件夹保存，例如 ACT 是 `output/act/act_seed0.mp4`，Diffusion 是 `output/diffusion/diffusion_seed0.mp4`，汇总文件也在对应文件夹中，例如 `output/act/act_summary.json`。添加 `--random_seeds=0` 可只跑首轮；需要降低渲染开销时可添加 `--render_width=320 --render_height=240`。如果想指定其它路径，仍可添加 `--video=自定义路径.mp4`。
+无头模式不会创建 GLFW 窗口，默认以 `400×300` 分辨率分别渲染主相机和腕部相机，再横向合成为视频。`--max_steps` 在无头模式下必须大于 0；视频按 `--control_hz`（默认 20 FPS）写入。默认输出会按模型分文件夹保存，例如 ACT 是 `output/act/act_seed0.mp4`，Diffusion 是 `output/diffusion/diffusion_seed0.mp4`，汇总文件也在对应文件夹中，例如 `output/act/act_summary.json`。无头模式下首轮结束后（无论成败）会继续评估 `--random_seeds`（默认 10）个随机种子并统计成功率；添加 `--random_seeds=0` 可只跑首轮。需要降低渲染开销时可添加 `--render_width=320 --render_height=240`。如果想指定其它路径，仍可添加 `--video=自定义路径.mp4`。
+
+> **训练效果排查（`eval_offline_il.py`）**：闭环成功率低时，先做离线开环评估——把数据集里已录制的观测逐帧喂给检查点，对比预测动作与示教动作，不依赖 MuJoCo 渲染：
+>
+> ```bash
+> python il/eval_offline_il.py --config_path=config/il/act_franka.yaml
+> python il/eval_offline_il.py --config_path=config/il/diffusion_franka.yaml --num_episodes=5
+> ```
+>
+> 输出各回合的关节 MAE（弧度）、夹爪命令准确率、首次闭合/张开时机相对示教的偏移帧数。判读：示教数据相邻帧关节增量约 0.03 rad——离线 MAE 明显大于该量级 → 拟合不足，优先加训练步数/检查数据；离线误差小但闭环失败 → 多为闭环漂移或夹爪时机问题，优先加数据覆盖，或按 `act_franka.yaml` 注释切换为分块开环执行对比。
 
 ### 步骤 5：采集语言条件数据（`collect_data_language.py`）
 
@@ -710,7 +725,7 @@ CUDA_VISIBLE_DEVICES=7 python vla/deploy_vla.py --config_path=config/vla/pi0_fra
 CUDA_VISIBLE_DEVICES=7 python vla/deploy_vla.py --config_path=config/vla/smolvla_franka.yaml --checkpoint=./ckpt/smolvla_franka_v2/checkpoints/030000/pretrained_model --device=cuda --seed=0 --max_steps=2000 --headless
 ```
 
-首轮成功后会自动再跑 10 个随机种子。每段视频顶部包含当前语言指令，视频默认保存到 `output/pi0/` 或 `output/smolvla/`，最终生成同目录下的 `pi0_summary.json` / `smolvla_summary.json`，记录每个 seed、指令、步数、视频路径和总成功率。若只想固定测试红杯，可添加 `--instruction="Place the red mug on the plate."`；蓝杯同理。
+首轮结束后（无论成败）会自动再跑 10 个随机种子统计成功率。每段视频顶部包含当前语言指令，视频默认保存到 `output/pi0/` 或 `output/smolvla/`，最终生成同目录下的 `pi0_summary.json` / `smolvla_summary.json`，记录每个 seed、指令、步数、视频路径和总成功率。若只想固定测试红杯，可添加 `--instruction="Place the red mug on the plate."`；蓝杯同理。
 
 ### `train_vla.py` —— 通用训练入口
 
@@ -760,7 +775,7 @@ hf auth login
 hf download a3124371940/franka_ckpt --local-dir ./hf_ckpt
 ```
 
-下载后会保留上传时的完整目录结构，例如 ACT 模型位于 `./hf_ckpt/ckpt/act_franka/checkpoints/020000/pretrained_model`。如果检查点编号不同，可以查找实际路径：
+下载后会保留上传时的完整目录结构，例如 ACT 模型位于 `./hf_ckpt/ckpt/act_franka/checkpoints/100000/pretrained_model`。如果检查点编号不同，可以查找实际路径：
 
 ```bash
 # Linux
@@ -773,7 +788,7 @@ Get-ChildItem -Path ./hf_ckpt -Recurse -Directory -Filter pretrained_model
 使用 CPU 部署下载的 ACT 模型：
 
 ```bash
-python il/deploy_il.py --config_path=config/il/act_franka.yaml --checkpoint=./hf_ckpt/ckpt/act_franka/checkpoints/020000/pretrained_model --device=cpu --seed=0 --max_steps=2000
+python il/deploy_il.py --config_path=config/il/act_franka.yaml --checkpoint=./hf_ckpt/ckpt/act_franka/checkpoints/100000/pretrained_model --device=cpu --seed=0 --max_steps=2000
 ```
 
 ---
@@ -832,12 +847,12 @@ python il/deploy_il.py --config_path=config/il/act_franka.yaml --checkpoint=./hf
 
 | 模型 | 预测长度 | 每次执行 | 每卡 batch | 训练步数 | 检查点目录 |
 |---|---:|---:|---:|---:|---|
-| ACT | 50 | 1 | 16 | 20,000 | `ckpt/act_franka` |
-| Diffusion | 16 | 8 | 16 | 20,000 | `ckpt/diffusion_franka` |
+| ACT | 50 | 1 | 16 | 100,000 | `ckpt/act_franka` |
+| Diffusion | 16 | 8 | 64 | 100,000 | `ckpt/diffusion_franka` |
 | π0 | 50 | 50 | 8 | 40,000 | `ckpt/pi0_franka_v2` |
 | SmolVLA | 50 | 10 | 16 | 30,000 | `ckpt/smolvla_franka_v2` |
 
-> `batch_size` 是每张 GPU 的 batch；例如 π0 使用 3 张卡时全局 batch 为 24。当前锁定的 LeRobot π0 实现要求 `n_action_steps == chunk_size`。ACT 每帧重规划并做时间集成，Diffusion 每 8 帧重规划；各模型都每 5,000 步保存一次，建议用同一组随机种子比较中间检查点的成功率。
+> `batch_size` 是每张 GPU 的 batch；例如 π0 使用 3 张卡时全局 batch 为 24。当前锁定的 LeRobot π0 实现要求 `n_action_steps == chunk_size`。ACT 每帧重规划并做时间集成，Diffusion 每 8 帧重规划；IL 每 10,000 步、VLA 每 5,000 步保存一次，建议用同一组随机种子比较中间检查点的成功率。Diffusion 的视觉编码器按官方结构从零训练（GroupNorm），当前锁定的 LeRobot 版本不允许它与 ImageNet 预训练权重同时开启。
 
 ```yaml
 dataset:
@@ -854,11 +869,11 @@ batch_size: 16
 job_name: act_franka
 resume: false                       # 是否从已有检查点续训
 seed: 42
-num_workers: 0                      # Windows 下建议 0
-steps: 20_000                       # ACT/DP 均按 20k 训练
+num_workers: 4                      # Linux 训练用 4；Windows 下需改回 0
+steps: 100_000                      # ACT/DP 均按 100k 训练
 eval_freq: -1                       # -1 表示训练中不评估
 log_freq: 50                        # 每 50 步记录一次日志
-save_freq: 5_000                    # 每 5000 步存一次，方便按成功率选模型
+save_freq: 10_000                   # 每 10000 步存一次，方便按成功率选模型
 use_policy_training_preset: true    # 使用策略自带的训练预设（优化器/调度器等）
 wandb:
   enable: true

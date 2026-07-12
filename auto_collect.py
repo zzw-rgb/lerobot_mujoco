@@ -1119,12 +1119,39 @@ def run_expert_episode(
         )
 
 
-def save_report(dataset_root: Path, results: list[AttemptResult]) -> Path:
+def load_report_results(dataset_root: Path) -> list[dict]:
     report_path = dataset_root / "auto_collect_report.json"
+    if not report_path.exists():
+        return []
+    try:
+        with report_path.open("r", encoding="utf-8") as file:
+            payload = json.load(file)
+        return list(payload.get("results", []))
+    except Exception:
+        return []
+
+
+def next_attempt_start(dataset_root: Path, fallback: int) -> int:
+    """续采时从历史报告延续 attempt 计数。
+
+    每次尝试的随机种子是 ``seed + attempt``。若 attempt 只从已保存条数重新数起，
+    上一轮里“尝试过但失败”的 attempt 编号会被重复使用，对应 seed 的物体布局
+    与已保存 episode 完全相同，数据集里会出现重复演示。
+    """
+    attempts = [int(item.get("attempt", -1)) for item in load_report_results(dataset_root)]
+    if not attempts:
+        return fallback
+    return max(max(attempts) + 1, fallback)
+
+
+def save_report(dataset_root: Path, results: list[AttemptResult]) -> Path:
+    """把本轮结果与历史报告合并写盘，保留完整的 attempt/seed 使用记录。"""
+    report_path = dataset_root / "auto_collect_report.json"
+    combined = load_report_results(dataset_root) + [asdict(r) for r in results]
     payload = {
-        "attempts": len(results),
-        "saved": sum(1 for r in results if r.success),
-        "results": [asdict(r) for r in results],
+        "attempts": len(combined),
+        "saved": sum(1 for r in combined if r.get("success")),
+        "results": combined,
     }
     with report_path.open("w", encoding="utf-8") as file:
         json.dump(payload, file, ensure_ascii=False, indent=2)
@@ -1185,7 +1212,9 @@ def main() -> None:
 
     results: list[AttemptResult] = []
     saved = existing_episodes
-    attempt_start = existing_episodes if existing_episodes else 0
+    # seed = args.seed + attempt；attempt 计数从历史报告延续，
+    # 避免续采时重跑上一轮已用过的 seed、采出布局完全重复的 episode。
+    attempt_start = next_attempt_start(Path(dataset.root), existing_episodes if existing_episodes else 0)
     consecutive_black = 0  # 连续黑图失败计数，用于熔断
     try:
         for attempt in range(attempt_start, attempt_start + max_attempts):

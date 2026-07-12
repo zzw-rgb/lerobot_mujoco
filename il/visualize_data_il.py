@@ -185,10 +185,10 @@ while PnPEnv.env.is_viewer_alive():
         # 从“传送带”取出下一帧数据（包含这一帧的动作、当时的相机图像、物体初始位姿等）。
         data = next(iter_dataloader)
         if step == 0:
-            # 只在回合的第一帧做一次：把仿真里的物体摆到“当初采集时的初始位置和朝向”。
+            # 只在回合的第一帧做一次：把仿真里的物体摆到“当初采集时的初始位置”。
             #   为什么必须这么做？因为同一套动作只有在物体起始摆放相同的前提下，
             #   重放出来才会和采集时一致——否则机械臂照搬动作却抓了个空。
-            #   data['obj_init'] 前 3 个数是位置(x,y,z)，后面的数是朝向(四元数)。
+            #   data['obj_init'] 共 6 个数：前 3 个是杯子位置(x,y,z)，后 3 个是盘子位置。
             PnPEnv.set_obj_pose(data['obj_init'][0,:3], data['obj_init'][0,3:])
         # 取出这一帧记录的动作。.numpy() 把 PyTorch 张量转成 numpy 数组，便于后续使用。
         action = data['action'].numpy()

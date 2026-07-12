@@ -11,11 +11,16 @@ policy:
   crop_shape: [224, 224]
   crop_is_random: true
   vision_backbone: resnet18
-  pretrained_backbone_weights: ResNet18_Weights.IMAGENET1K_V1
-  # Diffusion Policy 官方结构使用 GroupNorm；小 batch 和连续时序下比 BatchNorm 稳定。
-  # ResNet 卷积层仍会加载 ImageNet 预训练权重。
+  # 当前锁定的 LeRobot 版本不允许 use_group_norm 和预训练权重同时开启，
+  # 构建视觉编码器时会直接报错（modeling_diffusion.py: "You can't replace
+  # BatchNorm in a pretrained model without ruining the weights!"）。
+  # 按 Diffusion Policy 官方结构：GroupNorm + 从零训练 ResNet18。
+  pretrained_backbone_weights: null
   use_group_norm: true
   down_dims: [256, 512, 1024]
+  # 训练加噪仍为 100 步；DDIM 支持只用 10 步推理采样，
+  # 比把 DDPM 截断到 10 步的采样质量更稳定。
+  noise_scheduler_type: DDIM
   num_train_timesteps: 100
   num_inference_steps: 10
 
@@ -23,13 +28,13 @@ output_dir: ./ckpt/diffusion_franka
 job_name: diffusion_franka
 resume: false
 seed: 42
-num_workers: 0
-batch_size: 16
-steps: 20_000
+num_workers: 4   # Linux 训练用 4；在 Windows 上运行需改回 0
+batch_size: 64   # LeRobot Diffusion 预设 lr=1e-4 按大 batch 设定；显存不足可降到 32/16
+steps: 100_000   # Diffusion Policy 收敛慢，训练量需明显大于 ACT；中间检查点都会保存
 eval_freq: -1
 log_freq: 50
 save_checkpoint: true
-save_freq: 5_000
+save_freq: 10_000  # 保留中间检查点，按真实成功率选模型而不是只看 loss
 use_policy_training_preset: true
 
 wandb:

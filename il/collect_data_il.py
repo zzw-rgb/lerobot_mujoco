@@ -303,19 +303,25 @@ while PnPEnv.env.is_viewer_alive() and episode_id < NUM_DEMO:
         # 检查当前回合是否结束：由人按回车手动确认，不做自动成功判定
         # （check_success 只在 deploy_il.py 的自动 rollout 里用，采集阶段完全由人来把关质量）。
         if PnPEnv.is_finish_pressed():   # 按回车=手动确认本轮完成、存盘、进入下一轮
-            # 成功了！把这一整个回合的数据正式存盘，然后重置环境，准备采下一回合。
-            # save_episode：把刚才一帧帧攒下来的数据打包写成一个 episode 文件。
-            dataset.save_episode()
-            # reset：把仿真“重置”——机械臂回到初始姿势，杯子盘子重新摆放，相当于“重开一局”。
-            PnPEnv.reset(seed = SEED)
-            episode_id += 1
-            print("✓ 第 %d/%d 轮已保存" % (episode_id, NUM_DEMO))
-            record_flag = False        # 已完成回合数 +1
+            # 空回合保护：还没录到任何帧时按回车（例如刚重置完就误按），
+            # save_episode 会因空缓冲区抛异常导致采集程序退出，这里直接忽略。
+            if not record_flag or dataset.episode_buffer is None or dataset.episode_buffer["size"] == 0:
+                print("当前回合还没有录到任何帧，本次回车已忽略（先操作机械臂开始记录）。")
+            else:
+                # 成功了！把这一整个回合的数据正式存盘，然后重置环境，准备采下一回合。
+                # save_episode：把刚才一帧帧攒下来的数据打包写成一个 episode 文件。
+                dataset.save_episode()
+                # reset：把仿真“重置”——机械臂回到初始姿势，杯子盘子重新摆放，相当于“重开一局”。
+                PnPEnv.reset(seed = SEED)
+                episode_id += 1
+                print("✓ 第 %d/%d 轮已保存" % (episode_id, NUM_DEMO))
+                record_flag = False        # 已完成回合数 +1
         # 遥操作机器人：读取你此刻按下的键，换算成动作。
         # action 是“末端执行器位姿的增量(移动/旋转多少) + 夹爪状态”，reset 是“你是否按了 z 键想重置”。
         action, reset  = PnPEnv.teleop_robot()
-        # 一旦检测到你真的动了（动作之和不为 0），就打开记录开关，开始正式录制。
-        if not record_flag and sum(action) != 0:
+        # 一旦检测到你真的动了（有任意非零分量），就打开记录开关，开始正式录制。
+        # 用 np.any 而不是 sum：同时按下反向键（如 W+S）时增量相加会恰好为 0。
+        if not record_flag and np.any(action != 0):
             record_flag = True
             print("开始记录")
         if reset:

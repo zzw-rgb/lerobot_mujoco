@@ -7,13 +7,13 @@
     python il/deploy_il.py --config_path=config/il/act_franka.yaml
 
     # ACT：无头部署，视频默认输出到 output/act/
-    CUDA_VISIBLE_DEVICES=7 python il/deploy_il.py --config_path=config/il/act_franka.yaml --checkpoint=./ckpt/act_franka/checkpoints/020000/pretrained_model --device=cuda --seed=0 --max_steps=2000 --headless
+    CUDA_VISIBLE_DEVICES=7 python il/deploy_il.py --config_path=config/il/act_franka.yaml --checkpoint=./ckpt/act_franka/checkpoints/100000/pretrained_model --device=cuda --seed=0 --max_steps=2000 --headless
 
     # Diffusion Policy：窗口部署
     python il/deploy_il.py --config_path=config/il/diffusion_franka.yaml
 
     # Diffusion Policy：无头部署，视频默认输出到 output/diffusion/
-    CUDA_VISIBLE_DEVICES=7 python il/deploy_il.py --config_path=config/il/diffusion_franka.yaml --checkpoint=./ckpt/diffusion_franka/checkpoints/020000/pretrained_model --device=cuda --seed=0 --max_steps=2000 --headless
+    CUDA_VISIBLE_DEVICES=7 python il/deploy_il.py --config_path=config/il/diffusion_franka.yaml --checkpoint=./ckpt/diffusion_franka/checkpoints/100000/pretrained_model --device=cuda --seed=0 --max_steps=2000 --headless
 
 脚本会从 ``output_dir/checkpoints/last/pretrained_model`` 加载最新检查点，
 并根据检查点中的 ``input_features`` 自动决定使用主相机、腕部相机
@@ -92,7 +92,7 @@ def parse_args() -> argparse.Namespace:
         "--random_seeds",
         type=int,
         default=10,
-        help="After the first headless success, evaluate this many additional random seeds; 0 disables it.",
+        help="In headless mode, evaluate this many additional random seeds after the first episode; 0 disables it.",
     )
     return parser.parse_args()
 
@@ -280,9 +280,11 @@ def main() -> None:
         first_result = run_episode(policy, env, args, args.seed, first_video)
         results.append(first_result)
 
-        if args.headless and first_result.success and args.random_seeds > 0:
+        # 无论首轮成败都继续评估随机种子：策略较弱时更需要真实成功率和多布局的失败视频，
+        # 只在首轮成功时才评估会让弱策略永远只有 0/1 的样本。想省时间就调小 --random_seeds。
+        if args.headless and args.random_seeds > 0:
             extra_seeds = sample_random_seeds(args.seed, args.random_seeds)
-            print(f"首轮成功，开始评估 {len(extra_seeds)} 个随机种子：{extra_seeds}")
+            print(f"继续评估 {len(extra_seeds)} 个随机种子：{extra_seeds}")
             for seed in extra_seeds:
                 results.append(run_episode(policy, env, args, seed, video_path_for_seed(base_video, seed)))
     finally:

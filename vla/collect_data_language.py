@@ -309,15 +309,24 @@ while PnPEnv.env.is_viewer_alive() and episode_id < NUM_DEMO:
                 print(f"[已删除] 最近一条回合已删除，现有 {episode_id} 条；环境已重置，可重新采集。")
         # 检查该回合是否完成：由人按回车手动确认，不做自动成功判定，采集质量完全由人把关。
         if PnPEnv.is_finish_pressed():   # 按回车=手动确认本轮完成、存盘、进入下一轮
-            # 这一回合成功了 -> 把整段录像存盘，然后重置环境，准备下一回合。
-            dataset.save_episode()      # 把缓存的这一整回合写入数据集
-            PnPEnv.reset()              # 重置环境（重新随机摆放物体、机器人归位、换一句新指令）
-            episode_id += 1             # 完成回合数 +1
+            # 空回合保护：还没录到任何帧时按回车（例如刚重置完就误按），
+            # save_episode 会因空缓冲区抛异常导致采集程序退出，这里直接忽略。
+            if not record_flag or dataset.episode_buffer is None or dataset.episode_buffer["size"] == 0:
+                print("当前回合还没有录到任何帧，本次回车已忽略（先操作机械臂开始记录）。")
+            else:
+                # 这一回合成功了 -> 把整段录像存盘，然后重置环境，准备下一回合。
+                dataset.save_episode()      # 把缓存的这一整回合写入数据集
+                PnPEnv.reset()              # 重置环境（重新随机摆放物体、机器人归位、换一句新指令）
+                episode_id += 1             # 完成回合数 +1
+                # 复位记录开关：下一回合等操作者真正开始动作后再录制，
+                # 否则会把重置后“机器人静止不动”的开局无效帧全部写进数据集。
+                record_flag = False
         # 遥操作机器人：读取键盘输入，得到这一帧的动作 action 和「是否要求重置」的标志 reset。
         action, reset  = PnPEnv.teleop_robot()
-        # 如果机器人此前一直没动（record_flag 还是 False），而现在动作不全为 0，
+        # 如果机器人此前一直没动（record_flag 还是 False），而现在动作有任意非零分量，
         # 说明人开始操作了 -> 打开记录开关，从这一帧起才存数据。
-        if not record_flag and sum(action) != 0:
+        # 用 np.any 而不是 sum：同时按下反向键（如 W+S）时增量相加会恰好为 0。
+        if not record_flag and np.any(action != 0):
             record_flag = True
             print("开始记录")
         if reset:

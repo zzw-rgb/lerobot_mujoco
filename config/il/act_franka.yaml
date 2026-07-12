@@ -10,18 +10,22 @@ policy:
   chunk_size: 50
   n_action_steps: 1
   temporal_ensemble_coeff: 0.01
+  # 时间集成会平滑夹爪 0/1 的跳变。若部署视频显示夹爪开合时机偏晚
+  # （抬手时还没夹紧、撤离时还没松开），可改为分块开环执行：
+  # n_action_steps: 25
+  # temporal_ensemble_coeff: null
 
 output_dir: ./ckpt/act_franka
 job_name: act_franka
 resume: false
 seed: 42
-num_workers: 0
+num_workers: 4   # Linux 训练用 4；在 Windows 上运行需改回 0
 batch_size: 16
-steps: 20_000
+steps: 100_000   # 与 LeRobot ACT 参考训练量一致；loss 走平不代表成功率走平
 eval_freq: -1  # 本项目使用 deploy_il.py 在固定随机种子上评估
 log_freq: 50
 save_checkpoint: true
-save_freq: 5_000  # 多保留中间检查点，按真实成功率选模型而不是只看 loss
+save_freq: 10_000  # 保留中间检查点，按真实成功率选模型而不是只看 loss
 use_policy_training_preset: true
 
 wandb:
